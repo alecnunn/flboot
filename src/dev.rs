@@ -1,10 +1,14 @@
 use crate::model::Objects;
 
-/// Accepts "x86math", "x86math.dll", "src/x86math.dll.cpp" -> "x86math.dll".
+/// Accepts "x86math", "x86math.dll", "src/x86math.dll.cpp", and the object-file
+/// forms "x86math.dll.obj" / "src/x86math.dll.obj" -> "x86math.dll".
 pub fn norm_unit(objects: &Objects, name: &str) -> anyhow::Result<String> {
     let replaced = name.replace('\\', "/");
     let last = replaced.rsplit('/').next().unwrap_or(&replaced);
-    let base = last.strip_suffix(".cpp").unwrap_or(last);
+    let base = last
+        .strip_suffix(".cpp")
+        .or_else(|| last.strip_suffix(".obj"))
+        .unwrap_or(last);
 
     if objects.contains_key(base) {
         return Ok(base.to_string());
@@ -285,33 +289,30 @@ fn instruction_rows(symbol: Option<&serde_json::Value>) -> Vec<InstructionRow> {
         .collect()
 }
 
-pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: &str) -> anyhow::Result<()> {
-    let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
-    let unit = norm_unit(&objects, unit_arg)?;
+fn fmt_pct(symbol: Option<&serde_json::Value>) -> String {
+    symbol
+        .and_then(|s| s["match_percent"].as_f64())
+        .map(|p| format!("{p:.2}"))
+        .unwrap_or_else(|| "-".to_string())
+}
 
-    let tools = crate::manifest::load_tools_manifest()?;
-    let objdiff_cli = crate::bootstrap::resolve_objdiff_cli(&tools, None, crate::bootstrap::ToolMiss::RequireBootstrapped)?;
-    let output = std::process::Command::new(&objdiff_cli)
-        .args(["diff", "-p", ".", "-u", &format!("src/{unit}"), "-o", "-", "--format", "json", symbol])
-        .output()
-        .map_err(|e| anyhow::anyhow!("running objdiff-cli diff: {e}"))?;
-    if !output.status.success() {
-        anyhow::bail!("objdiff-cli diff failed:\n{}", String::from_utf8_lossy(&output.stderr));
-    }
-    let diff_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+fn symbols_array<'a>(diff_json: &'a serde_json::Value, side: &str) -> &'a [serde_json::Value] {
+    diff_json
+        .get(side)
+        .and_then(|s| s.get("symbols"))
+        .and_then(|s| s.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
 
-    let want = symbol_key(symbol);
-    let left = find_symbol(&diff_json, "left", &want);
-    let right = find_symbol(&diff_json, "right", &want);
-
-    let fmt_pct = |s: Option<&serde_json::Value>| {
-        s.and_then(|s| s["match_percent"].as_f64())
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".to_string())
-    };
-    println!("TARGET {}%   OURS {}%", fmt_pct(left), fmt_pct(right));
-    println!("{:<44} | OURS", "TARGET");
-    println!("{}", "-".repeat(90));
+/// Renders one function's target-vs-ours instruction table, headed by a
+/// separator line naming the symbol and its match percentages.
+fn render_one(name: &str, left: Option<&serde_json::Value>, right: Option<&serde_json::Value>) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("==== {name}  TARGET {}%  OURS {}% ====\n", fmt_pct(left), fmt_pct(right)));
+    out.push_str(&format!("{:<44} | OURS\n", "TARGET"));
+    out.push_str(&"-".repeat(90));
+    out.push('\n');
 
     let lr = instruction_rows(left);
     let rr = instruction_rows(right);
@@ -322,8 +323,65 @@ pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: &str) -> anyhow::Result
         let lk = lr.get(i).map(|r| r.diff_kind.as_str()).unwrap_or("");
         let rk = rr.get(i).map(|r| r.diff_kind.as_str()).unwrap_or("");
         let mark = if none(lk) && none(rk) { "  " } else { "<>" };
-        println!("{:<44} |{}| {}", la, mark, ra);
+        out.push_str(&format!("{:<44} |{}| {}\n", la, mark, ra));
     }
+    out
+}
+
+/// Renders the diff for a single named function, or -- when `symbol` is `None`
+/// -- every function in the target, each under its own separator header.
+fn render_diff(diff_json: &serde_json::Value, symbol: Option<&str>) -> String {
+    match symbol {
+        Some(sym) => {
+            let want = symbol_key(sym);
+            let left = find_symbol(diff_json, "left", &want);
+            let right = find_symbol(diff_json, "right", &want);
+            let name = left.or(right).and_then(|s| s["name"].as_str()).unwrap_or(sym);
+            render_one(name, left, right)
+        }
+        None => {
+            let targets = symbols_array(diff_json, "left");
+            if targets.is_empty() {
+                return "no functions found in target\n".to_string();
+            }
+            let mut out = String::new();
+            for (i, s) in targets.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                let name = s["name"].as_str().unwrap_or("");
+                let right = find_symbol(diff_json, "right", &symbol_key(name));
+                out.push_str(&render_one(name, Some(s), right));
+            }
+            out
+        }
+    }
+}
+
+/// Diff one function (`symbol = Some`) or every function in the unit
+/// (`symbol = None`). `unit_arg` accepts any form `norm_unit` understands,
+/// including the object-file name (e.g. "x86math.dll.obj").
+pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: Option<&str>) -> anyhow::Result<()> {
+    let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
+    let unit = norm_unit(&objects, unit_arg)?;
+
+    let tools = crate::manifest::load_tools_manifest()?;
+    let objdiff_cli = crate::bootstrap::resolve_objdiff_cli(&tools, None, crate::bootstrap::ToolMiss::RequireBootstrapped)?;
+    let unit_flag = format!("src/{unit}");
+    let mut args = vec!["diff", "-p", ".", "-u", &unit_flag, "-o", "-", "--format", "json"];
+    if let Some(sym) = symbol {
+        args.push(sym);
+    }
+    let output = std::process::Command::new(&objdiff_cli)
+        .args(&args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("running objdiff-cli diff: {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!("objdiff-cli diff failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let diff_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    print!("{}", render_diff(&diff_json, symbol));
     Ok(())
 }
 
@@ -588,5 +646,62 @@ mod tests {
             symbol_key("?get_base@IObjInspectImpl@@UBEHAAI@Z"),
             symbol_key("?get_base@CEqObj@@QBEIXZ")
         );
+    }
+
+    #[test]
+    fn resolves_object_file_name() {
+        let objects = fixture_objects();
+        assert_eq!(norm_unit(&objects, "x86math.dll.obj").unwrap(), "x86math.dll");
+        assert_eq!(norm_unit(&objects, "src/x86math.dll.obj").unwrap(), "x86math.dll");
+    }
+
+    fn diff_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "left": { "symbols": [
+                { "name": "?foo@@YAXXZ", "match_percent": 100.0,
+                  "instructions": [ { "instruction": { "address": "0", "formatted": "push ebp" }, "diff_kind": "DIFF_NONE" } ] },
+                { "name": "?bar@@YAXXZ", "match_percent": 50.0,
+                  "instructions": [ { "instruction": { "address": "4", "formatted": "ret" }, "diff_kind": "DIFF_REPLACE" } ] }
+            ]},
+            "right": { "symbols": [
+                { "name": "?foo@@YAXXZ", "match_percent": 87.5,
+                  "instructions": [ { "instruction": { "address": "0", "formatted": "mov eax, 1" }, "diff_kind": "DIFF_REPLACE" } ] }
+            ]}
+        })
+    }
+
+    #[test]
+    fn render_diff_single_symbol_shows_only_that_function() {
+        let out = render_diff(&diff_fixture(), Some("?foo@@YAXXZ"));
+        assert!(out.contains("==== ?foo@@YAXXZ"), "{out}");
+        assert!(out.contains("TARGET 100.00%"), "{out}");
+        assert!(out.contains("OURS 87.50%"), "{out}");
+        assert!(out.contains("push ebp"), "{out}");
+        assert!(!out.contains("?bar@@YAXXZ"), "should not include other functions: {out}");
+    }
+
+    #[test]
+    fn render_diff_all_shows_every_target_function_with_separators() {
+        let out = render_diff(&diff_fixture(), None);
+        assert_eq!(out.matches("==== ").count(), 2, "one separator per function: {out}");
+        assert!(out.contains("==== ?foo@@YAXXZ"), "{out}");
+        assert!(out.contains("==== ?bar@@YAXXZ"), "{out}");
+        // bar exists only in the target, so OURS has no percentage.
+        let bar_header = out.lines().find(|l| l.contains("?bar@@YAXXZ")).unwrap();
+        assert!(bar_header.contains("OURS -%"), "bar header: {bar_header}");
+    }
+
+    #[test]
+    fn render_diff_missing_symbol_renders_dashes() {
+        let out = render_diff(&diff_fixture(), Some("?nope@@YAXXZ"));
+        assert!(out.contains("==== ?nope@@YAXXZ"), "{out}");
+        assert!(out.contains("TARGET -%"), "{out}");
+        assert!(out.contains("OURS -%"), "{out}");
+    }
+
+    #[test]
+    fn render_diff_all_with_no_target_functions_reports_empty() {
+        let empty = serde_json::json!({ "left": { "symbols": [] }, "right": { "symbols": [] } });
+        assert!(render_diff(&empty, None).contains("no functions found"));
     }
 }

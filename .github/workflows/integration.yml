@@ -67,3 +67,9 @@ jobs:
       - name: fl progress (match report)
         working-directory: baseline
         run: ../target/release/fl progress
+
+      - name: fl diff (object-file name + diff-all, no symbol)
+        working-directory: baseline
+        run: |
+          ../target/release/fl diff dacom.dll.obj > /dev/null
+          ../target/release/fl diff dacom > /dev/null
