@@ -25,7 +25,7 @@ lzma-rs = "0.3.0"
 regex = "1.12.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-sha1 = "0.10"
+sha1 = "0.11"
 tar = "0.4.46"
 ureq = "3"
 which = "8.0.4"

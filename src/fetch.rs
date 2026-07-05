@@ -13,7 +13,7 @@ pub fn sha1_file(path: &Path) -> anyhow::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 pub fn verify_hash(required: bool, path: &Path, expected: &str) -> anyhow::Result<()> {
