@@ -106,6 +106,9 @@ pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> anyhow::Result<()
     Ok(())
 }
 
+// Only the unix seven-zip download path calls this; keep it compiled and
+// tested everywhere, but silence dead-code on Windows where nothing calls it.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> anyhow::Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let mut reader = std::io::BufReader::new(file);

@@ -32,10 +32,11 @@ fn unit_claims(config_id: &str, unit: &str) -> anyhow::Result<Option<Vec<(String
     let lines: Vec<&str> = diff.lines().collect();
     let mut pairs = Vec::new();
     for i in 0..lines.len().saturating_sub(1) {
-        if let (Some(c1), Some(c2)) = (re.captures(lines[i]), re.captures(lines[i + 1])) {
-            if &c1[1] == "-" && &c2[1] == "+" {
-                pairs.push((c1[2].to_string(), c2[2].to_string()));
-            }
+        if let (Some(c1), Some(c2)) = (re.captures(lines[i]), re.captures(lines[i + 1]))
+            && &c1[1] == "-"
+            && &c2[1] == "+"
+        {
+            pairs.push((c1[2].to_string(), c2[2].to_string()));
         }
     }
     Ok(Some(pairs))
@@ -92,10 +93,11 @@ mod tests {
         let lines: Vec<&str> = diff.lines().collect();
         let mut pairs = Vec::new();
         for i in 0..lines.len().saturating_sub(1) {
-            if let (Some(c1), Some(c2)) = (re.captures(lines[i]), re.captures(lines[i + 1])) {
-                if &c1[1] == "-" && &c2[1] == "+" {
-                    pairs.push((c1[2].to_string(), c2[2].to_string()));
-                }
+            if let (Some(c1), Some(c2)) = (re.captures(lines[i]), re.captures(lines[i + 1]))
+                && &c1[1] == "-"
+                && &c2[1] == "+"
+            {
+                pairs.push((c1[2].to_string(), c2[2].to_string()));
             }
         }
         assert_eq!(pairs, vec![("sub_6F71DE0".to_string(), "_inv_sqrt_dynamic_init".to_string())]);
@@ -108,10 +110,11 @@ mod tests {
         let lines: Vec<&str> = diff.lines().collect();
         let mut pairs = Vec::new();
         for i in 0..lines.len().saturating_sub(1) {
-            if let (Some(c1), Some(c2)) = (re.captures(lines[i]), re.captures(lines[i + 1])) {
-                if &c1[1] == "-" && &c2[1] == "+" {
-                    pairs.push((c1[2].to_string(), c2[2].to_string()));
-                }
+            if let (Some(c1), Some(c2)) = (re.captures(lines[i]), re.captures(lines[i + 1]))
+                && &c1[1] == "-"
+                && &c2[1] == "+"
+            {
+                pairs.push((c1[2].to_string(), c2[2].to_string()));
             }
         }
         assert!(pairs.is_empty());

@@ -75,15 +75,15 @@ fn strip_arg_quotes(flag: &str) -> String {
 /// ninja would -- and CL.EXE's /Fo does not create it, failing with C1083.
 fn compile_output_path(parts: &[String]) -> Option<std::path::PathBuf> {
     for (i, p) in parts.iter().enumerate() {
-        if let Some(rest) = p.strip_prefix("/Fo") {
-            if !rest.is_empty() {
-                return Some(std::path::PathBuf::from(rest));
-            }
+        if let Some(rest) = p.strip_prefix("/Fo")
+            && !rest.is_empty()
+        {
+            return Some(std::path::PathBuf::from(rest));
         }
-        if p == "-o" {
-            if let Some(next) = parts.get(i + 1) {
-                return Some(std::path::PathBuf::from(next));
-            }
+        if p == "-o"
+            && let Some(next) = parts.get(i + 1)
+        {
+            return Some(std::path::PathBuf::from(next));
         }
     }
     None
@@ -151,11 +151,11 @@ pub fn cmd_build(config_id: &str, unit_args: &[String]) -> anyhow::Result<()> {
         // ninja creates each edge's output directory before running it; since
         // we run the command ourselves, we must too, or CL.EXE's /Fo fails
         // with C1083 when build/<id>/obj/.../ doesn't already exist.
-        if let Some(out) = compile_output_path(&parts) {
-            if let Some(parent) = out.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| anyhow::anyhow!("creating output dir {}: {e}", parent.display()))?;
-            }
+        if let Some(out) = compile_output_path(&parts)
+            && let Some(parent) = out.parent()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("creating output dir {}: {e}", parent.display()))?;
         }
         let mut command = if parts[0].to_lowercase().ends_with("cl.exe") {
             parts[0] = repo_root.join(&parts[0]).to_string_lossy().to_string();
@@ -249,7 +249,7 @@ pub fn symbol_key(name: &str) -> String {
     if name.starts_with('?') {
         return name.to_string();
     }
-    let trimmed = name.trim_start_matches(|c| c == '_' || c == '@');
+    let trimmed = name.trim_start_matches(['_', '@']);
     match trimmed.find('@') {
         Some(idx) => trimmed[..idx].to_string(),
         None => trimmed.to_string(),
