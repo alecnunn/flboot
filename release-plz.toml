@@ -1,0 +1,8 @@
+[[package]]
+name = "flboot"
+# Distributed as prebuilt `fl` binaries via GitHub Releases, not crates.io.
+# Skip `cargo publish` but still cut a git tag and a GitHub Release (the
+# Release workflow attaches the binaries to it).
+publish = false
+git_release_enable = true
+git_tag_enable = true

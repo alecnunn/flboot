@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Maintains the "chore: release vX.Y.Z" PR: bumps Cargo.toml + CHANGELOG.md
+  # from conventional commits. Merging that PR is what triggers a real release
+  # (handled by the release job below on the resulting push to main).
+  release-pr:
+    name: release-plz PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: release-plz release-pr
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release-pr
+        env:
+          # Set a RELEASE_PLZ_TOKEN secret (PAT or GitHub App token) so CI runs
+          # on the release PR; falls back to GITHUB_TOKEN when unset.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # When a version-bump commit lands on main (i.e. the release PR is merged),
+  # tags it and creates the GitHub Release. Exposes whether a release happened
+  # so the upload job can attach binaries.
+  release:
+    name: release-plz release
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      releases: ${{ steps.release-plz.outputs.releases }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: release-plz release
+        id: release-plz
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # Builds fl for each platform and uploads the archives to the release that
+  # the previous job just created. Only runs when a release actually happened.
+  upload-assets:
+    name: upload ${{ matrix.target }}
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: fl
+            archive: fl-x86_64-unknown-linux-gnu.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: fl.exe
+            archive: fl-x86_64-pc-windows-msvc.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: tar -czf "${{ matrix.archive }}" -C "target/${{ matrix.target }}/release" "${{ matrix.bin }}"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.bin }}" -DestinationPath "${{ matrix.archive }}"
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
+        shell: bash
+        run: gh release upload "$TAG" "${{ matrix.archive }}" --clobber
