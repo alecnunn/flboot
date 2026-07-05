@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: test
+        run: cargo test --all-features --locked
+
+  # Opt-in end-to-end smoke test against the baseline decomp-config repo.
+  # Stays skipped (and green) until the BASELINE_CONFIG_REPO repository
+  # variable is set (Settings -> Secrets and variables -> Actions -> Variables).
+  # Optionally set BASELINE_CONFIG_ID to override the default config id.
+  integration:
+    name: integration (baseline config)
+    if: vars.BASELINE_CONFIG_REPO != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fl
+        run: cargo build --release --locked
+      - name: Clone baseline config repo
+        run: git clone --depth 1 "${{ vars.BASELINE_CONFIG_REPO }}" baseline
+      - name: fl bootstrap (skip delink)
+        working-directory: baseline
+        run: |
+          args=(bootstrap --skip-delink)
+          if [ -n "${{ vars.BASELINE_CONFIG_ID }}" ]; then
+            args=(--config-id "${{ vars.BASELINE_CONFIG_ID }}" "${args[@]}")
+          fi
+          "${GITHUB_WORKSPACE}/target/release/fl" "${args[@]}"
+      - name: Assert generated build files exist
+        working-directory: baseline
+        run: test -f build.ninja && test -f objdiff.json && test -f compile_commands.json
