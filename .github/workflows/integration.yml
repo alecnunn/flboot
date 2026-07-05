@@ -1,0 +1,69 @@
+name: Integration
+
+# End-to-end verification against the public baseline decomp-config repo:
+# builds fl, runs a full `fl bootstrap` (downloads the MSVC6 toolchain + the
+# original binaries, delinks, and generates the build files), then compiles
+# every unit's scaffolded source with MSVC6 (natively on Windows, under Wine on
+# Linux). Manual-only: it downloads large/original artifacts, so it never runs
+# on pull requests or forks.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BASELINE_REPO: https://github.com/alecnunn/freelancer-decomp
+  WINEDEBUG: -all
+
+jobs:
+  integration:
+    name: integration (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build fl
+        run: cargo build --release --locked
+
+      - name: Install Wine (Linux, to run MSVC6)
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine wine64 wine32:i386
+          wine wineboot --init
+
+      - name: Clone baseline config repo
+        run: git clone --depth 1 "$BASELINE_REPO" baseline
+
+      - name: fl bootstrap (fetch tools + orig, delink, generate)
+        working-directory: baseline
+        run: ../target/release/fl bootstrap
+
+      - name: Assert generated build files exist
+        working-directory: baseline
+        run: |
+          for f in build.ninja objdiff.json compile_commands.json; do
+            test -f "$f" || { echo "missing $f"; exit 1; }
+          done
+          echo "generated: build.ninja, objdiff.json, compile_commands.json"
+
+      - name: fl build (compile every unit with MSVC6)
+        working-directory: baseline
+        run: ../target/release/fl build $(ls src/*.cpp)
+
+      - name: fl progress (match report)
+        working-directory: baseline
+        run: ../target/release/fl progress
