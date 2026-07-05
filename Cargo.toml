@@ -3,6 +3,18 @@ name = "flboot"
 description = "all-in-one decomp management tooling for Freelancer"
 version = "0.1.0"
 edition = "2024"
+authors = ["Alec Nunn <alec.nunn@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+keywords = ["decompilation", "freelancer", "reverse-engineering", "objdiff"]
+categories = ["command-line-utilities", "development-tools"]
+# Distributed as prebuilt binaries via GitHub Releases, not published to crates.io.
+publish = false
+
+# The package is named `flboot` but ships a short `fl` command.
+[[bin]]
+name = "fl"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"

@@ -34,7 +34,7 @@ pub fn resolve_tool(
                 Ok(fixed_path.to_path_buf())
             } else {
                 anyhow::bail!(
-                    "{} not found on PATH or at {}; run `flboot bootstrap` first",
+                    "{} not found on PATH or at {}; run `fl bootstrap` first",
                     candidates[0],
                     fixed_path.display()
                 )

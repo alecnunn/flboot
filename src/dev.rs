@@ -70,7 +70,7 @@ fn strip_arg_quotes(flag: &str) -> String {
 
 /// Extracts a compile command's output object path from its (already
 /// quote-stripped) tokens: MSVC's `/Fo<path>` or the portable `-o <path>`.
-/// Needed because `flboot build` runs ninja's command lines directly instead
+/// Needed because `fl build` runs ninja's command lines directly instead
 /// of via ninja, so nothing creates the output's parent directory the way
 /// ninja would -- and CL.EXE's /Fo does not create it, failing with C1083.
 fn compile_output_path(parts: &[String]) -> Option<std::path::PathBuf> {

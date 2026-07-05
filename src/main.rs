@@ -11,7 +11,7 @@ mod manifest;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "flboot", about = "Unified bootstrap + dev-loop tool for the Freelancer decomp")]
+#[command(name = "fl", about = "Unified bootstrap + dev-loop tool for the Freelancer decomp")]
 struct Cli {
     #[arg(long, default_value = "052103_release_1149_Ipatch_ver1254", global = true)]
     config_id: String,
