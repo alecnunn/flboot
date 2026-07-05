@@ -1,0 +1,9 @@
+/target
+
+# Bootstrap-generated artifacts (produced by `fl bootstrap` in a decomp repo,
+# never in this tool's own repo, but ignored defensively).
+/build
+/orig
+/build.ninja
+/objdiff.json
+/compile_commands.json
