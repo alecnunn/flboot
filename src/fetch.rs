@@ -63,14 +63,14 @@ pub fn download_file(url: &str, dest: &Path, expected_sha1: Option<&str>) -> any
     }
 
     let response = ureq::get(url)
-        .set(
+        .header(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         )
         .call()
         .map_err(|e| anyhow::anyhow!("downloading {url}: {e}"))?;
 
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let mut file = std::fs::File::create(dest)?;
     std::io::copy(&mut reader, &mut file)?;
     drop(file);
