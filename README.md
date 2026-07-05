@@ -100,4 +100,4 @@ the commit and publishes a GitHub Release with the `fl` binaries attached.
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+Released into the public domain under [The Unlicense](LICENSE).

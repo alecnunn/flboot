@@ -32,13 +32,17 @@ jobs:
         run: cargo test --all-features --locked
 
   # Opt-in end-to-end smoke test against the baseline decomp-config repo.
-  # Stays skipped (and green) until the BASELINE_CONFIG_REPO repository
-  # variable is set (Settings -> Secrets and variables -> Actions -> Variables).
-  # Optionally set BASELINE_CONFIG_ID to override the default config id.
+  # Stays skipped (and green) until the RUN_INTEGRATION repository variable is
+  # set to "true" (Settings -> Secrets and variables -> Actions -> Variables),
+  # which should happen once the baseline repo is populated. Defaults to
+  # alecnunn/freelancer-decomp; override with BASELINE_CONFIG_REPO, and set
+  # BASELINE_CONFIG_ID to override the default config id.
   integration:
     name: integration (baseline config)
-    if: vars.BASELINE_CONFIG_REPO != ''
+    if: vars.RUN_INTEGRATION == 'true'
     runs-on: ubuntu-latest
+    env:
+      BASELINE_REPO: ${{ vars.BASELINE_CONFIG_REPO || 'https://github.com/alecnunn/freelancer-decomp' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +50,7 @@ jobs:
       - name: Build fl
         run: cargo build --release --locked
       - name: Clone baseline config repo
-        run: git clone --depth 1 "${{ vars.BASELINE_CONFIG_REPO }}" baseline
+        run: git clone --depth 1 "$BASELINE_REPO" baseline
       - name: fl bootstrap (skip delink)
         working-directory: baseline
         run: |
