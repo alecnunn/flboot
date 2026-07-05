@@ -1,8 +1,11 @@
 [[package]]
 name = "flboot"
 # Distributed as prebuilt `fl` binaries via GitHub Releases, not crates.io.
-# Skip `cargo publish` but still cut a git tag and a GitHub Release (the
-# Release workflow attaches the binaries to it).
+# `publish = false` here (in the release-plz config, NOT in Cargo.toml) tells
+# release-plz to skip `cargo publish` while still bumping the version, cutting a
+# git tag, and creating a GitHub Release (the Release workflow attaches the
+# binaries to it). Keeping Cargo.toml publishable is what lets release-plz see
+# the package at all.
 publish = false
 git_release_enable = true
 git_tag_enable = true

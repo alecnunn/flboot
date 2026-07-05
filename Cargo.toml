@@ -9,8 +9,9 @@ repository = "https://github.com/alecnunn/flboot"
 readme = "README.md"
 keywords = ["decompilation", "freelancer", "reverse-engineering", "objdiff"]
 categories = ["command-line-utilities", "development-tools"]
-# Distributed as prebuilt binaries via GitHub Releases, not published to crates.io.
-publish = false
+# NOTE: crates.io publishing is disabled in release-plz.toml (publish = false),
+# not here. A `publish = false` in this manifest would make release-plz skip the
+# package entirely, so it would never cut a GitHub Release either.
 
 # The package is named `flboot` but ships a short `fl` command.
 [[bin]]
