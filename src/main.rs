@@ -44,8 +44,8 @@ enum Commands {
     Claim { unit: String, renames: Vec<String> },
     /// Show original->claimed symbol mapping reconstructed from git history
     Claims { units: Vec<String> },
-    /// Target-vs-ours disassembly diff for one function
-    Diff { unit: String, symbol: String },
+    /// Target-vs-ours disassembly diff for one function, or all functions in the unit if omitted
+    Diff { unit: String, symbol: Option<String> },
     /// Target-only disassembly listing for one or more symbols
     Dis { unit: String, symbols: Vec<String> },
     /// Match percentage report
@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Delink { unit } => dev::cmd_delink(&cli.config_id, &unit),
         Commands::Claim { unit, renames } => dev::cmd_claim(&cli.config_id, &unit, &renames),
         Commands::Claims { units } => claims::cmd_claims(&cli.config_id, &units),
-        Commands::Diff { unit, symbol } => dev::cmd_diff(&cli.config_id, &unit, &symbol),
+        Commands::Diff { unit, symbol } => dev::cmd_diff(&cli.config_id, &unit, symbol.as_deref()),
         Commands::Dis { unit, symbols } => dev::cmd_dis(&cli.config_id, &unit, &symbols),
         Commands::Progress { units } => dev::cmd_progress(&cli.config_id, &units),
     }

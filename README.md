@@ -58,8 +58,11 @@ fl claim x86math sub_6F71DE0=inv_sqrt
 # Show original -> claimed symbol mappings reconstructed from git history:
 fl claims
 
-# Target-vs-ours disassembly diff for one function:
+# Target-vs-ours disassembly diff for one function, or every function in the
+# unit if the symbol is omitted (the unit accepts x86math, x86math.dll, or
+# x86math.dll.obj):
 fl diff x86math inv_sqrt
+fl diff x86math            # all functions, each under its own separator
 
 # Target-only disassembly listing:
 fl dis x86math inv_sqrt
