@@ -148,8 +148,32 @@ pub struct CompileCommandEntry {
     pub arguments: Vec<String>,
 }
 
-fn cxxflags_dict(config: &Config) -> &IndexMap<String, FlagSet> {
-    config.cxxflags.as_ref().unwrap_or(&config.cflags)
+/// Returns the C++ compile flags for a unit by merging `cflags` and `cxxflags`:
+/// all flags from `cflags[key]` (the shared base) are always included, and any
+/// additional flags that appear in `cxxflags[key]` but not already in the cflags
+/// set are appended after. When `cxxflags` is `None`, this is equivalent to
+/// `get_flags(key, cflags, ...)`.
+///
+/// This prevents per-unit flags declared only in `cflags` (e.g. `/GX`, `/G6`)
+/// from being silently dropped when `cxxflags` is also present in the config.
+pub fn get_cxx_flags_merged(
+    flags_key: &str,
+    cflags: &IndexMap<String, FlagSet>,
+    cxxflags: Option<&IndexMap<String, FlagSet>>,
+    compiler_root: &str,
+    sdk_root: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut result = get_flags(flags_key, cflags, compiler_root, sdk_root)?;
+    if let Some(cxx_dict) = cxxflags {
+        let extra = get_flags(flags_key, cxx_dict, compiler_root, sdk_root)?;
+        let seen: std::collections::HashSet<String> = result.iter().cloned().collect();
+        for f in extra {
+            if !seen.contains(&f) {
+                result.push(f);
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Parses a single line for a local `#include "..."` directive, returning the
@@ -221,7 +245,6 @@ pub fn write_ninja(config_id: &str, config: &Config, objects: &Objects) -> anyho
     let cxx = &config.compiler;
     let cc = config.compiler_c.as_deref().unwrap_or(cxx);
     let is_msvc = cxx.to_lowercase().ends_with("cl.exe");
-    let cxx_dict = cxxflags_dict(config);
 
     out.push_str(&format!("cc = {cc}\n\n"));
     out.push_str(&format!("cxx = {cxx}\n\n"));
@@ -245,7 +268,7 @@ pub fn write_ninja(config_id: &str, config: &Config, objects: &Objects) -> anyho
     let mut all_objs = Vec::new();
     for (lib_name, lib) in objects {
         let c_flags = get_flags(&lib.cflags, &config.cflags, &config.compiler_root, &config.sdk_root)?.join(" ");
-        let cxx_flags = get_flags(&lib.cflags, cxx_dict, &config.compiler_root, &config.sdk_root)?.join(" ");
+        let cxx_flags = get_cxx_flags_merged(&lib.cflags, &config.cflags, config.cxxflags.as_ref(), &config.compiler_root, &config.sdk_root)?.join(" ");
 
         for src in lib.objects.keys() {
             let obj = get_target_path(config_id, lib_name, src);
@@ -326,7 +349,6 @@ pub fn write_compile_commands(config: &Config, objects: &Objects) -> anyhow::Res
     let cxx = &config.compiler;
     let cc = config.compiler_c.as_deref().unwrap_or(cxx);
     let is_msvc = cxx.to_lowercase().ends_with("cl.exe");
-    let cxx_dict = cxxflags_dict(config);
 
     let directory = lexical_absolute(Path::new(SOURCE_ROOT))?.to_string_lossy().to_string();
     let mut entries = Vec::new();
@@ -336,7 +358,7 @@ pub fn write_compile_commands(config: &Config, objects: &Objects) -> anyhow::Res
             .iter()
             .map(|f| strip_arg_quotes(f))
             .collect();
-        let cxx_flags: Vec<String> = get_flags(&lib.cflags, cxx_dict, &config.compiler_root, &config.sdk_root)?
+        let cxx_flags: Vec<String> = get_cxx_flags_merged(&lib.cflags, &config.cflags, config.cxxflags.as_ref(), &config.compiler_root, &config.sdk_root)?
             .iter()
             .map(|f| strip_arg_quotes(f))
             .collect();
@@ -546,26 +568,4 @@ mod generation_tests {
         let objects = fixture_objects();
         let file = write_objdiff("cfgid", &config, &objects);
         assert_eq!(file.units.len(), 1);
-        let unit = &file.units[0];
-        assert_eq!(unit.name, "src/A.dll");
-        assert_eq!(unit.target_path, "build/cfgid/delink/A.dll/A.dll.obj");
-        assert_eq!(unit.base_path, "build/cfgid/obj/A.dll/src/A.dll.obj");
-        assert_eq!(unit.metadata.progress_categories, vec!["A.dll"]);
-        assert_eq!(file.progress_categories.len(), 1);
-        assert_eq!(file.progress_categories[0].id, "A.dll");
-    }
-
-    #[test]
-    fn write_compile_commands_builds_absolute_paths_and_strips_quotes() {
-        let config = fixture_config();
-        let objects = fixture_objects();
-        let entries = write_compile_commands(&config, &objects).unwrap();
-        assert_eq!(entries.len(), 1);
-        let entry = &entries[0];
-        assert!(entry.file.ends_with("A.dll.cpp"));
-        assert_eq!(entry.arguments[0], "build/msvc6.0/BIN/CL.EXE");
-        assert_eq!(entry.arguments[1], "/c");
-        assert!(entry.arguments.contains(&"/D_DLL".to_string()));
-        assert!(entry.arguments.last().unwrap().ends_with("A.dll.cpp"));
-    }
-}
+        le
