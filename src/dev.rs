@@ -260,7 +260,9 @@ pub fn symbol_key(name: &str) -> String {
     }
 }
 
-const COL: usize = 44;
+/// Minimum width of the TARGET column. Functions whose widest target row
+/// exceeds this get a wider column instead, so the separator never drifts.
+const MIN_COL: usize = 44;
 const RESET: &str = "\x1b[0m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
@@ -294,14 +296,20 @@ fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
     let lp = paint_pct(view.target.as_ref().and_then(|s| s.match_percent), color);
     let rp = paint_pct(view.base.as_ref().and_then(|s| s.match_percent), color);
 
-    let mut out = String::new();
-    out.push_str(&format!("==== {}  TARGET {lp}%  OURS {rp}% ====\n", view.name));
-    out.push_str(&format!("{:<COL$} | OURS\n", "TARGET"));
-    out.push_str(&"-".repeat(90));
-    out.push('\n');
-
     let lr = view.target.as_ref().map(|s| &s.rows).unwrap_or(&empty);
     let rr = view.base.as_ref().map(|s| &s.rows).unwrap_or(&empty);
+
+    // A single overlong target row would otherwise push the separator right on
+    // that row alone -- and those are the changed rows, the ones worth reading.
+    // Size the column to the function's widest row instead.
+    let col = lr.iter().map(|r| r.width()).max().unwrap_or(0).max(MIN_COL);
+
+    let mut out = String::new();
+    out.push_str(&format!("==== {}  TARGET {lp}%  OURS {rp}% ====\n", view.name));
+    out.push_str(&format!("{:<col$} | OURS\n", "TARGET"));
+    out.push_str(&"-".repeat(col + 6));
+    out.push('\n');
+
     for i in 0..lr.len().max(rr.len()) {
         let (left, right) = (lr.get(i), rr.get(i));
         let changed = |r: Option<&crate::objdiff::Row>| r.is_some_and(|r| r.changed);
@@ -312,9 +320,10 @@ fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
         };
 
         // Pad against the row's printed width: `colored` carries escapes that
-        // cost bytes but no columns, so `{:<44}` on it would misalign.
+        // cost bytes but no columns, so formatting it with `{:<col$}` would
+        // misalign.
         let la = left.map(|r| r.display(color)).unwrap_or_default();
-        let pad = COL.saturating_sub(left.map(|r| r.width()).unwrap_or(0));
+        let pad = col.saturating_sub(left.map(|r| r.width()).unwrap_or(0));
         let ra = right.map(|r| r.display(color)).unwrap_or_default();
 
         out.push_str(format!("{la}{:pad$} |{mark}| {ra}", "").trim_end());
@@ -772,5 +781,76 @@ mod tests {
     fn absent_side_percentage_is_unpainted() {
         let out = render_diff(&[bar_view()], None, true);
         assert!(out.contains("OURS -%"), "absent side should render bare dash: {out:?}");
+    }
+
+    /// Separator column, taken from rows that actually have an OURS side.
+    fn separator_columns(out: &str) -> Vec<usize> {
+        out.lines()
+            .filter(|l| l.contains(" |") && !l.starts_with("===="))
+            .map(|l| l.find(" |").unwrap())
+            .collect()
+    }
+
+    /// Regression: an overlong target row used to push the separator right on
+    /// that row alone, so the OURS column stopped lining up -- and overlong
+    /// rows are typically the changed ones.
+    #[test]
+    fn overlong_target_row_does_not_shift_the_separator() {
+        let long = "17:      fdivr     st, qword ptr [__delink_ida_const_start+0x44]";
+        assert!(long.len() > MIN_COL, "fixture must exceed the minimum column");
+        let view = crate::objdiff::FnView {
+            name: "?wide@@YAXXZ".to_string(),
+            size: 8,
+            target: Some(side(50.0, vec![row("0: push ebp", false), row(long, true)])),
+            base: Some(side(50.0, vec![row("0: push ebp", false), row("1a: fdivr", true)])),
+        };
+        let out = render_diff(&[view], None, false);
+        let cols = separator_columns(&out);
+        assert!(cols.len() >= 3, "expected header plus two rows: {out}");
+        assert_eq!(
+            cols.iter().collect::<std::collections::HashSet<_>>().len(),
+            1,
+            "all separators must share one column, got {cols:?}\n{out}"
+        );
+    }
+
+    /// Short functions keep the historical 44-column layout.
+    #[test]
+    fn narrow_function_keeps_minimum_column() {
+        let out = render_diff(&[foo_view()], None, false);
+        for c in separator_columns(&out) {
+            assert_eq!(c, MIN_COL, "narrow rows should pad to MIN_COL:\n{out}");
+        }
+    }
+
+    /// Widening the column must not disturb the color/plain equivalence.
+    #[test]
+    fn overlong_row_keeps_color_and_plain_aligned() {
+        let long = "17:      fdivr     st, qword ptr [__delink_ida_const_start+0x44]";
+        let view = || crate::objdiff::FnView {
+            name: "?wide@@YAXXZ".to_string(),
+            size: 8,
+            target: Some(side(50.0, vec![row(long, true)])),
+            base: Some(side(50.0, vec![row("1a: fdivr", true)])),
+        };
+        let plain = render_diff(&[view()], None, false);
+        let colored = render_diff(&[view()], None, true);
+        let strip = |s: &str| {
+            let mut out = String::new();
+            let mut it = s.chars();
+            while let Some(c) = it.next() {
+                if c == '\x1b' {
+                    for c in it.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        assert_eq!(strip(&colored), plain);
     }
 }
