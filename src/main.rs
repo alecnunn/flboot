@@ -2,6 +2,7 @@ mod root;
 mod log;
 mod model;
 mod codegen;
+mod objdiff;
 mod fetch;
 mod bootstrap;
 mod dev;
