@@ -119,6 +119,6 @@ fn main() -> anyhow::Result<()> {
             cli.color.enabled(),
             cli.branches == BranchStyle::Arrows,
         ),
-        Commands::Progress { units } => dev::cmd_progress(&cli.config_id, &units),
+        Commands::Progress { units } => dev::cmd_progress(&cli.config_id, &units, cli.color.enabled()),
     }
 }

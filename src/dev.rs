@@ -277,6 +277,11 @@ fn paint(s: &str, escape: &str, color: bool) -> String {
     }
 }
 
+/// Paints an already-formatted percentage green at 100%, red below.
+fn paint_pct_text(text: &str, value: f32, color: bool) -> String {
+    paint(text, if value >= 100.0 { GREEN } else { RED }, color)
+}
+
 /// A match percentage, green at 100% and red below, so a fully-matched
 /// function is recognizable without reading the number.
 fn paint_pct(pct: Option<f32>, color: bool) -> String {
@@ -549,59 +554,119 @@ pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String], color: bool,
     Ok(())
 }
 
-pub fn cmd_progress(config_id: &str, unit_args: &[String]) -> anyhow::Result<()> {
-    let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
+type UnitMeasure = Option<(crate::objdiff::Measures, Vec<crate::objdiff::FnItem>)>;
 
-    let tools = crate::manifest::load_tools_manifest()?;
-    let objdiff_cli = crate::bootstrap::resolve_objdiff_cli(&tools, None, crate::bootstrap::ToolMiss::RequireBootstrapped)?;
-    let output = std::process::Command::new(&objdiff_cli)
-        .args(["report", "generate", "-o", "-", "--format", "json"])
-        .output()
-        .map_err(|e| anyhow::anyhow!("running objdiff-cli report: {e}"))?;
-    if !output.status.success() {
-        anyhow::bail!("objdiff-cli report failed:\n{}", String::from_utf8_lossy(&output.stderr));
+/// Diffs and measures every unit, spreading the work across threads.
+///
+/// Units are independent, and one of them (Common.dll, ~8600 functions) dwarfs
+/// the rest, so a serial pass is dominated by it. Results are returned in the
+/// input order, and `None` marks a unit with no delinked target. Only measures
+/// cross the thread boundary; the loaded objects stay inside their worker.
+fn diff_units_parallel(units: &[crate::codegen::ObjdiffUnit]) -> anyhow::Result<Vec<UnitMeasure>> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(units.len().max(1));
+
+    let measure_one = |unit: &crate::codegen::ObjdiffUnit| -> anyhow::Result<UnitMeasure> {
+        let diff = crate::objdiff::diff_paths_with(
+            &unit.target_path,
+            &unit.base_path,
+            crate::objdiff::report_config(),
+        )?;
+        if diff.target.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(crate::objdiff::unit_measures(&diff)))
+    };
+
+    if threads <= 1 {
+        return units.iter().map(measure_one).collect();
     }
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
-    let m = &report["measures"];
-    println!(
-        "OVERALL: {}/{} functions, code {:.4}%",
-        m["matched_functions"].as_u64().unwrap_or(0),
-        m["total_functions"].as_u64().unwrap_or(0),
-        m["matched_code_percent"].as_f64().unwrap_or(0.0),
-    );
+    // Chunk rather than spawn per unit: 28-ish units, and a chunk keeps each
+    // worker's peak memory to one loaded object pair at a time.
+    let chunk = units.len().div_ceil(threads);
+    let mut out: Vec<UnitMeasure> = Vec::with_capacity(units.len());
+    std::thread::scope(|scope| -> anyhow::Result<()> {
+        let handles: Vec<_> = units
+            .chunks(chunk)
+            .map(|slice| scope.spawn(move || slice.iter().map(measure_one).collect::<anyhow::Result<Vec<_>>>()))
+            .collect();
+        for handle in handles {
+            let chunk_result = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("progress worker panicked"))?;
+            out.extend(chunk_result?);
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Match percentage report. Diffs every unit in-process and aggregates the
+/// measures the way `objdiff-cli report generate` does.
+///
+/// Naming a unit expands it: the per-function breakdown is printed too, and
+/// the unit is shown even at 0%. With no unit named, units that have matched
+/// nothing are omitted to keep the summary short.
+pub fn cmd_progress(config_id: &str, unit_args: &[String], color: bool) -> anyhow::Result<()> {
+    let config: crate::model::Config =
+        crate::model::load_jsonc(&crate::model::config_path(config_id, None))?;
+    let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
 
     let wanted: std::collections::HashSet<String> = unit_args
         .iter()
         .map(|a| norm_unit(&objects, a).map(|u| format!("src/{u}")))
         .collect::<anyhow::Result<_>>()?;
 
-    let empty_units = Vec::new();
-    for u in report["units"].as_array().unwrap_or(&empty_units) {
-        let name = u["name"].as_str().unwrap_or("");
-        if !wanted.is_empty() && !wanted.contains(name) {
+    // The same unit list objdiff.json declares, so the report covers exactly
+    // what the objdiff GUI would.
+    let objdiff_file = crate::codegen::write_objdiff(config_id, &config, &objects);
+
+    let measured = diff_units_parallel(&objdiff_file.units)?;
+
+    let mut all = Vec::new();
+    let mut rows = Vec::new();
+    for (unit, result) in objdiff_file.units.iter().zip(measured) {
+        // A unit with no delinked target has nothing to measure against;
+        // objdiff-cli skips it too, since our units are never `complete`.
+        let Some((measures, functions)) = result else {
+            crate::log::warn(&format!("skipping unit without target: {}", unit.name));
             continue;
+        };
+        all.push(measures);
+        if wanted.is_empty() || wanted.contains(&unit.name) {
+            rows.push((unit.name.clone(), measures, functions));
         }
-        let um = &u["measures"];
-        let matched_functions = um["matched_functions"].as_u64().unwrap_or(0);
-        if wanted.is_empty() && matched_functions == 0 {
+    }
+
+    let total = crate::objdiff::Measures::total(all);
+    println!(
+        "OVERALL: {}/{} functions, code {}%",
+        total.matched_functions,
+        total.total_functions,
+        paint_pct_text(&format!("{:.4}", total.matched_code_percent), total.matched_code_percent, color),
+    );
+
+    for (name, m, functions) in &rows {
+        if wanted.is_empty() && m.matched_functions == 0 {
             continue;
         }
         println!(
-            "  {:<20} {:>3}/{:<4}  code {:>6.2}%",
-            name,
-            matched_functions,
-            um["total_functions"].as_u64().unwrap_or(0),
-            um["matched_code_percent"].as_f64().unwrap_or(0.0),
+            "  {name:<20} {:>3}/{:<4}  code {}%",
+            m.matched_functions,
+            m.total_functions,
+            paint_pct_text(&format!("{:>6.2}", m.matched_code_percent), m.matched_code_percent, color),
         );
-        if !wanted.is_empty() {
-            let empty_fns = Vec::new();
-            for f in u["functions"].as_array().unwrap_or(&empty_fns) {
-                let pct = f["fuzzy_match_percent"].as_f64().unwrap_or(0.0);
-                let mark = if pct >= 100.0 { "OK " } else { "   " };
-                let size = f["size"].as_u64().map(|s| s.to_string()).unwrap_or_else(|| "?".to_string());
-                println!("      {mark} {pct:>6.1}% {size:>5}  {}", f["name"].as_str().unwrap_or(""));
-            }
+        if wanted.is_empty() {
+            continue;
+        }
+        for f in functions {
+            let done = f.match_percent >= 100.0;
+            let mark = paint(if done { "OK " } else { "   " }, GREEN, color && done);
+            let pct = paint_pct_text(&format!("{:>6.1}", f.match_percent), f.match_percent, color);
+            println!("      {mark} {pct}% {:>5}  {}", f.size, f.name);
         }
     }
     Ok(())
