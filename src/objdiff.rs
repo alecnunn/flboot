@@ -209,6 +209,9 @@ pub struct Row {
     pub text: String,
     pub colored: String,
     pub changed: bool,
+    /// When this row branches elsewhere: the destination row index and
+    /// objdiff's branch index, which selects the arrow's color.
+    pub branch_to: Option<(usize, u32)>,
 }
 
 impl Row {
@@ -224,6 +227,12 @@ impl Row {
 }
 
 const RESET: &str = "\x1b[0m";
+
+/// The color objdiff assigns to a branch, so a drawn arrow matches the hue the
+/// engine would have given its own `~>` marker.
+pub fn branch_color(branch_idx: u32) -> &'static str {
+    ansi_for(DiffTextColor::Rotating(branch_idx as u8))
+}
 
 /// Maps objdiff's semantic segment colors onto ANSI escapes. `Normal` is left
 /// unstyled so ordinary instruction text keeps the terminal's own foreground
@@ -274,7 +283,12 @@ pub fn render_row(
             DiffText::Opcode(mnemonic, _) => format!("{mnemonic} "),
             DiffText::Argument(arg) => arg.to_string(),
             DiffText::BranchDest(addr) => format!("{addr:x}"),
-            DiffText::BranchArrow(_) => " ~> ".to_string(),
+            // objdiff emits `~>` both before the mnemonic (this row is a branch
+            // destination) and after the operands (this row branches away). We
+            // draw a connected gutter instead, but keep the four columns so the
+            // mnemonic stays aligned with rows that have no branch, where
+            // objdiff emits Spacing(4).
+            DiffText::BranchArrow(_) => "    ".to_string(),
             DiffText::Symbol(sym) => sym.demangled_name.as_ref().unwrap_or(&sym.name).clone(),
             DiffText::Addend(addend) => match addend.cmp(&0i64) {
                 std::cmp::Ordering::Greater => format!("+{addend:#x}"),
@@ -295,7 +309,15 @@ pub fn render_row(
     })?;
 
     let (text, colored) = assemble(parts);
-    Ok(Row { text, colored, changed: ins_row.kind != InstructionDiffKind::None })
+    Ok(Row {
+        text,
+        colored,
+        changed: ins_row.kind != InstructionDiffKind::None,
+        branch_to: ins_row
+            .branch_to
+            .as_ref()
+            .map(|b| (b.ins_idx as usize, b.branch_idx)),
+    })
 }
 
 /// Builds a row's plain and colored forms from styled parts, trimming trailing

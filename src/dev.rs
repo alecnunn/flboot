@@ -289,9 +289,141 @@ fn paint_pct(pct: Option<f32>, color: bool) -> String {
     paint(&text, escape, color)
 }
 
+/// A branch drawn in the gutter: the rows it spans, which end is the
+/// destination, and objdiff's color index.
+struct Branch {
+    lo: usize,
+    hi: usize,
+    dest: usize,
+    src: usize,
+    branch_idx: u32,
+    lane: usize,
+}
+
+/// Assigns each branch a lane, innermost first, so a lane is reused only by
+/// branches whose spans do not overlap. Nested loops therefore nest visually
+/// instead of overwriting one another.
+fn assign_lanes(rows: &[crate::objdiff::Row]) -> Vec<Branch> {
+    let mut branches: Vec<Branch> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(src, r)| r.branch_to.map(|(dest, idx)| (src, dest, idx)))
+        .filter(|(src, dest, _)| *dest < rows.len() && src != dest)
+        .map(|(src, dest, branch_idx)| Branch {
+            lo: src.min(dest),
+            hi: src.max(dest),
+            dest,
+            src,
+            branch_idx,
+            lane: 0,
+        })
+        .collect();
+
+    // Shorter spans take inner lanes (nearest the text).
+    branches.sort_by_key(|b| (b.hi - b.lo, b.lo));
+
+    let mut lane_ends: Vec<usize> = Vec::new();
+    for b in branches.iter_mut() {
+        // A lane is free when every branch already in it ends before this one
+        // begins. Track only the furthest extent, since spans are sorted.
+        let lane = lane_ends.iter().position(|end| *end < b.lo);
+        match lane {
+            Some(l) => {
+                lane_ends[l] = b.hi;
+                b.lane = l;
+            }
+            None => {
+                lane_ends.push(b.hi);
+                b.lane = lane_ends.len() - 1;
+            }
+        }
+    }
+
+    // Lane 0 is drawn rightmost (closest to the instruction text), so invert.
+    let lanes = lane_ends.len();
+    for b in branches.iter_mut() {
+        b.lane = lanes - 1 - b.lane;
+    }
+    branches
+}
+
+/// Renders the branch gutter for one side: a per-row string plus its printed
+/// width. Returns empty strings and width 0 when there is nothing to draw.
+fn branch_gutter(rows: &[crate::objdiff::Row], color: bool) -> (Vec<String>, usize) {
+    let branches = assign_lanes(rows);
+    if branches.is_empty() {
+        return (vec![String::new(); rows.len()], 0);
+    }
+    let lanes = branches.iter().map(|b| b.lane).max().unwrap_or(0) + 1;
+    let width = lanes + 3; // lanes, then a two-char head, then a space
+
+    let mut out = Vec::with_capacity(rows.len());
+    for i in 0..rows.len() {
+        // Each lane cell, and the branch that owns it (for color).
+        let mut cells: Vec<(char, Option<u32>)> = vec![(' ', None); lanes];
+        // Track the head's lane so the innermost branch wins when two terminate
+        // on the same row; lanes increase toward the text.
+        let mut head: Option<(&str, u32, usize)> = None;
+
+        for b in &branches {
+            if i < b.lo || i > b.hi {
+                continue;
+            }
+            let ch = if i == b.lo {
+                ','
+            } else if i == b.hi {
+                '`'
+            } else {
+                '|'
+            };
+            cells[b.lane] = (ch, Some(b.branch_idx));
+
+            if i == b.dest || i == b.src {
+                let arrow = if i == b.dest { "->" } else { "--" };
+                if head.is_none_or(|(_, _, lane)| b.lane > lane) {
+                    head = Some((arrow, b.branch_idx, b.lane));
+                }
+            }
+        }
+
+        // Run a horizontal from the endpoint's lane out to the head, so the
+        // arrow reads as one connected line. Only blank cells are filled: an
+        // inner lane's vertical must stay unbroken, since it belongs to a
+        // different branch that merely passes through this row.
+        if let Some((_, idx, lane)) = head {
+            for cell in cells.iter_mut().skip(lane + 1) {
+                if cell.0 == ' ' {
+                    *cell = ('-', Some(idx));
+                }
+            }
+        }
+
+        let mut s = String::new();
+        for (ch, idx) in &cells {
+            match (color, idx) {
+                (true, Some(idx)) if *ch != ' ' => {
+                    s.push_str(crate::objdiff::branch_color(*idx));
+                    s.push(*ch);
+                    s.push_str(RESET);
+                }
+                _ => s.push(*ch),
+            }
+        }
+        match head {
+            Some((arrow, idx, _)) => {
+                s.push_str(&paint(arrow, crate::objdiff::branch_color(idx), color))
+            }
+            None => s.push_str("  "),
+        }
+        s.push(' ');
+        out.push(s);
+    }
+    (out, width)
+}
+
 /// Renders one function's target-vs-ours instruction table, headed by a
 /// separator line naming the symbol and its match percentages.
-fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
+fn render_one(view: &crate::objdiff::FnView, color: bool, branches: bool) -> String {
     let empty: Vec<crate::objdiff::Row> = Vec::new();
     let lp = paint_pct(view.target.as_ref().and_then(|s| s.match_percent), color);
     let rp = paint_pct(view.base.as_ref().and_then(|s| s.match_percent), color);
@@ -299,10 +431,16 @@ fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
     let lr = view.target.as_ref().map(|s| &s.rows).unwrap_or(&empty);
     let rr = view.base.as_ref().map(|s| &s.rows).unwrap_or(&empty);
 
+    let (lg, lgw) = if branches { branch_gutter(lr, color) } else { (vec![], 0) };
+    let (rg, rgw) = if branches { branch_gutter(rr, color) } else { (vec![], 0) };
+    let gutter = |g: &[String], i: usize, w: usize| {
+        g.get(i).cloned().unwrap_or_else(|| " ".repeat(w))
+    };
+
     // A single overlong target row would otherwise push the separator right on
     // that row alone -- and those are the changed rows, the ones worth reading.
     // Size the column to the function's widest row instead.
-    let col = lr.iter().map(|r| r.width()).max().unwrap_or(0).max(MIN_COL);
+    let col = lr.iter().map(|r| r.width()).max().unwrap_or(0).max(MIN_COL) + lgw;
 
     let mut out = String::new();
     out.push_str(&format!("==== {}  TARGET {lp}%  OURS {rp}% ====\n", view.name));
@@ -319,12 +457,13 @@ fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
             "  ".to_string()
         };
 
-        // Pad against the row's printed width: `colored` carries escapes that
-        // cost bytes but no columns, so formatting it with `{:<col$}` would
-        // misalign.
-        let la = left.map(|r| r.display(color)).unwrap_or_default();
-        let pad = col.saturating_sub(left.map(|r| r.width()).unwrap_or(0));
-        let ra = right.map(|r| r.display(color)).unwrap_or_default();
+        // Pad against the row's printed width: `colored` and the gutter carry
+        // escapes that cost bytes but no columns, so formatting them with
+        // `{:<col$}` would misalign.
+        let la = format!("{}{}", gutter(&lg, i, lgw), left.map(|r| r.display(color)).unwrap_or_default());
+        let lw = lgw + left.map(|r| r.width()).unwrap_or(0);
+        let pad = col.saturating_sub(lw);
+        let ra = format!("{}{}", gutter(&rg, i, rgw), right.map(|r| r.display(color)).unwrap_or_default());
 
         out.push_str(format!("{la}{:pad$} |{mark}| {ra}", "").trim_end());
         out.push('\n');
@@ -334,7 +473,7 @@ fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
 
 /// Renders the diff for a single named function, or -- when `symbol` is `None`
 /// -- every function in the target, each under its own separator header.
-fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>, color: bool) -> String {
+fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>, color: bool, branches: bool) -> String {
     if views.is_empty() {
         return match symbol {
             // A requested symbol that matched nothing still gets a header, so
@@ -347,6 +486,7 @@ fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>, color: bo
                     base: None,
                 },
                 color,
+                branches,
             ),
             None => "no functions found in target\n".to_string(),
         };
@@ -357,7 +497,7 @@ fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>, color: bo
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&render_one(view, color));
+        out.push_str(&render_one(view, color, branches));
     }
     out
 }
@@ -365,18 +505,18 @@ fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>, color: bo
 /// Diff one function (`symbol = Some`) or every function in the unit
 /// (`symbol = None`). `unit_arg` accepts any form `norm_unit` understands,
 /// including the object-file name (e.g. "x86math.dll.obj").
-pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: Option<&str>, color: bool) -> anyhow::Result<()> {
+pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: Option<&str>, color: bool, branches: bool) -> anyhow::Result<()> {
     let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
     let unit = norm_unit(&objects, unit_arg)?;
 
     let unit_diff = crate::objdiff::diff_unit(config_id, &objects, &unit)?;
     let views = unit_diff.function_views(symbol)?;
 
-    print!("{}", render_diff(&views, symbol, color));
+    print!("{}", render_diff(&views, symbol, color, branches));
     Ok(())
 }
 
-pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String], color: bool) -> anyhow::Result<()> {
+pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String], color: bool, branches: bool) -> anyhow::Result<()> {
     if symbols.is_empty() {
         anyhow::bail!("dis needs at least one symbol");
     }
@@ -396,8 +536,14 @@ pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String], color: bool)
             println!("  <not found in target>");
             continue;
         };
-        for row in &target.rows {
-            println!("  {}", row.display(color));
+        let (gutter, width) = if branches {
+            branch_gutter(&target.rows, color)
+        } else {
+            (vec![], 0)
+        };
+        for (i, row) in target.rows.iter().enumerate() {
+            let g = gutter.get(i).cloned().unwrap_or_else(|| " ".repeat(width));
+            println!("  {g}{}", row.display(color));
         }
     }
     Ok(())
@@ -642,6 +788,7 @@ mod tests {
             text: text.to_string(),
             colored: format!("\x1b[36m{text}\x1b[0m"),
             changed,
+            branch_to: None,
         }
     }
 
@@ -674,7 +821,7 @@ mod tests {
 
     #[test]
     fn render_diff_single_symbol_shows_only_that_function() {
-        let out = render_diff(&[foo_view()], Some("?foo@@YAXXZ"), false);
+        let out = render_diff(&[foo_view()], Some("?foo@@YAXXZ"), false, false);
         assert!(out.contains("==== ?foo@@YAXXZ"), "{out}");
         assert!(out.contains("TARGET 100.00%"), "{out}");
         assert!(out.contains("OURS 87.50%"), "{out}");
@@ -686,7 +833,7 @@ mod tests {
     /// only in our build still flags.
     #[test]
     fn render_diff_marks_row_changed_on_either_side() {
-        let out = render_diff(&[foo_view()], None, false);
+        let out = render_diff(&[foo_view()], None, false, false);
         let line = out.lines().find(|l| l.contains("push ebp")).unwrap();
         assert!(line.contains("<>"), "changed row must be marked: {line}");
     }
@@ -699,13 +846,13 @@ mod tests {
             target: Some(side(100.0, vec![row("0: ret", false)])),
             base: Some(side(100.0, vec![row("0: ret", false)])),
         };
-        let line = render_diff(&[view], None, false).lines().find(|l| l.contains("ret")).unwrap().to_string();
+        let line = render_diff(&[view], None, false, false).lines().find(|l| l.contains("ret")).unwrap().to_string();
         assert!(!line.contains("<>"), "unchanged row must not be marked: {line}");
     }
 
     #[test]
     fn render_diff_all_shows_every_target_function_with_separators() {
-        let out = render_diff(&[foo_view(), bar_view()], None, false);
+        let out = render_diff(&[foo_view(), bar_view()], None, false, false);
         assert_eq!(out.matches("==== ").count(), 2, "one separator per function: {out}");
         assert!(out.contains("==== ?foo@@YAXXZ"), "{out}");
         assert!(out.contains("==== ?bar@@YAXXZ"), "{out}");
@@ -716,7 +863,7 @@ mod tests {
 
     #[test]
     fn render_diff_missing_symbol_renders_dashes() {
-        let out = render_diff(&[], Some("?nope@@YAXXZ"), false);
+        let out = render_diff(&[], Some("?nope@@YAXXZ"), false, false);
         assert!(out.contains("==== ?nope@@YAXXZ"), "{out}");
         assert!(out.contains("TARGET -%"), "{out}");
         assert!(out.contains("OURS -%"), "{out}");
@@ -724,18 +871,18 @@ mod tests {
 
     #[test]
     fn render_diff_all_with_no_target_functions_reports_empty() {
-        assert!(render_diff(&[], None, false).contains("no functions found"));
+        assert!(render_diff(&[], None, false, false).contains("no functions found"));
     }
 
     #[test]
     fn render_diff_emits_no_escapes_when_color_disabled() {
-        let out = render_diff(&[foo_view()], None, false);
+        let out = render_diff(&[foo_view()], None, false, false);
         assert!(!out.contains('\x1b'), "plain output must have no escapes: {out:?}");
     }
 
     #[test]
     fn render_diff_emits_escapes_when_color_enabled() {
-        let out = render_diff(&[foo_view()], None, true);
+        let out = render_diff(&[foo_view()], None, true, false);
         assert!(out.contains('\x1b'), "colored output must carry escapes");
         // Row content is styled by objdiff's own segment colors; the fixture
         // wraps the whole row, real rows are styled per segment.
@@ -763,15 +910,15 @@ mod tests {
             out
         };
 
-        let plain = render_diff(&[foo_view()], None, false);
-        let colored = render_diff(&[foo_view()], None, true);
+        let plain = render_diff(&[foo_view()], None, false, false);
+        let colored = render_diff(&[foo_view()], None, true, false);
         assert_eq!(strip(&colored), plain, "stripping escapes must recover the plain rendering");
     }
 
     /// A 100% match reads green, anything less reads red.
     #[test]
     fn percentages_are_painted_by_match_state() {
-        let out = render_diff(&[foo_view()], None, true);
+        let out = render_diff(&[foo_view()], None, true, false);
         assert!(out.contains("\x1b[32m100.00\x1b[0m"), "100% should be green: {out:?}");
         assert!(out.contains("\x1b[31m87.50\x1b[0m"), "sub-100% should be red: {out:?}");
     }
@@ -779,8 +926,135 @@ mod tests {
     /// An absent side has no percentage to paint, so `-` stays unstyled.
     #[test]
     fn absent_side_percentage_is_unpainted() {
-        let out = render_diff(&[bar_view()], None, true);
+        let out = render_diff(&[bar_view()], None, true, false);
         assert!(out.contains("OURS -%"), "absent side should render bare dash: {out:?}");
+    }
+
+    fn branch_row(text: &str, branch_to: Option<(usize, u32)>) -> crate::objdiff::Row {
+        crate::objdiff::Row {
+            text: text.to_string(),
+            colored: text.to_string(),
+            changed: false,
+            branch_to,
+        }
+    }
+
+    /// A backward branch: the destination gets the arrowhead, the source closes
+    /// the span, and the rows between carry the vertical.
+    #[test]
+    fn gutter_draws_backward_branch_from_source_to_destination() {
+        let rows = vec![
+            branch_row("0: sub", None),
+            branch_row("5: mov", None),      // destination
+            branch_row("7: or", None),
+            branch_row("3a: jl", Some((1, 0))), // source -> row 1
+            branch_row("43: add", None),
+        ];
+        let (g, w) = branch_gutter(&rows, false);
+        assert_eq!(w, 4, "one lane plus a two-char head plus a space");
+        assert_eq!(g[0], "    ");
+        assert_eq!(g[1], ",-> ", "destination takes the arrowhead");
+        assert_eq!(g[2], "|   ", "row inside the span carries the vertical");
+        assert_eq!(g[3], "`-- ", "source closes the span");
+        assert_eq!(g[4], "    ");
+    }
+
+    /// A forward branch points down: the source opens the span, the destination
+    /// below it takes the arrowhead.
+    #[test]
+    fn gutter_draws_forward_branch() {
+        let rows = vec![
+            branch_row("0: je", Some((2, 0))),
+            branch_row("2: mov", None),
+            branch_row("4: ret", None),
+        ];
+        let (g, _) = branch_gutter(&rows, false);
+        assert_eq!(g[0], ",-- ", "source opens the span");
+        assert_eq!(g[1], "|   ");
+        assert_eq!(g[2], "`-> ", "destination takes the arrowhead");
+    }
+
+    /// Nested branches occupy separate lanes, innermost nearest the text, so a
+    /// short branch inside a long one does not overwrite it.
+    #[test]
+    fn gutter_nests_overlapping_branches_in_separate_lanes() {
+        let rows = vec![
+            branch_row("0: outer-dest", None),
+            branch_row("1: inner-dest", None),
+            branch_row("2: body", None),
+            branch_row("3: inner-src", Some((1, 1))),
+            branch_row("4: outer-src", Some((0, 0))),
+        ];
+        let (g, w) = branch_gutter(&rows, false);
+        assert_eq!(w, 5, "two lanes plus head plus space");
+        // Outer branch owns the left lane; inner owns the right.
+        assert_eq!(g[0], ",--> ");
+        assert_eq!(g[1], "|,-> ");
+        assert_eq!(g[2], "||   ");
+        assert_eq!(g[3], "|`-- ");
+        assert_eq!(g[4], "`--- ");
+    }
+
+    /// Disjoint branches reuse one lane rather than widening the gutter.
+    #[test]
+    fn gutter_reuses_a_lane_for_disjoint_branches() {
+        let rows = vec![
+            branch_row("0: a-dest", None),
+            branch_row("1: a-src", Some((0, 0))),
+            branch_row("2: b-dest", None),
+            branch_row("3: b-src", Some((2, 1))),
+        ];
+        let (_, w) = branch_gutter(&rows, false);
+        assert_eq!(w, 4, "non-overlapping spans share a lane");
+    }
+
+    #[test]
+    fn gutter_is_empty_without_branches() {
+        let rows = vec![branch_row("0: nop", None), branch_row("1: ret", None)];
+        let (g, w) = branch_gutter(&rows, false);
+        assert_eq!(w, 0);
+        assert!(g.iter().all(|s| s.is_empty()));
+    }
+
+    /// A branch whose destination row does not exist is ignored rather than
+    /// panicking on the out-of-range index.
+    #[test]
+    fn gutter_ignores_out_of_range_destination() {
+        let rows = vec![branch_row("0: jmp", Some((99, 0)))];
+        let (_, w) = branch_gutter(&rows, false);
+        assert_eq!(w, 0);
+    }
+
+    /// Colored gutters must occupy the same columns as plain ones.
+    #[test]
+    fn gutter_color_and_plain_have_equal_width() {
+        let rows = vec![
+            branch_row("0: dest", None),
+            branch_row("1: src", Some((0, 3))),
+        ];
+        let (plain, wp) = branch_gutter(&rows, false);
+        let (colored, wc) = branch_gutter(&rows, true);
+        assert_eq!(wp, wc);
+        for (p, c) in plain.iter().zip(colored.iter()) {
+            assert!(c.contains('\x1b'), "colored gutter should carry escapes: {c:?}");
+            let stripped: String = {
+                let mut out = String::new();
+                let mut it = c.chars();
+                while let Some(ch) = it.next() {
+                    if ch == '\x1b' {
+                        for ch in it.by_ref() {
+                            if ch == 'm' {
+                                break;
+                            }
+                        }
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out
+            };
+            assert_eq!(&stripped, p);
+        }
     }
 
     /// Separator column, taken from rows that actually have an OURS side.
@@ -804,7 +1078,7 @@ mod tests {
             target: Some(side(50.0, vec![row("0: push ebp", false), row(long, true)])),
             base: Some(side(50.0, vec![row("0: push ebp", false), row("1a: fdivr", true)])),
         };
-        let out = render_diff(&[view], None, false);
+        let out = render_diff(&[view], None, false, false);
         let cols = separator_columns(&out);
         assert!(cols.len() >= 3, "expected header plus two rows: {out}");
         assert_eq!(
@@ -817,7 +1091,7 @@ mod tests {
     /// Short functions keep the historical 44-column layout.
     #[test]
     fn narrow_function_keeps_minimum_column() {
-        let out = render_diff(&[foo_view()], None, false);
+        let out = render_diff(&[foo_view()], None, false, false);
         for c in separator_columns(&out) {
             assert_eq!(c, MIN_COL, "narrow rows should pad to MIN_COL:\n{out}");
         }
@@ -833,8 +1107,8 @@ mod tests {
             target: Some(side(50.0, vec![row(long, true)])),
             base: Some(side(50.0, vec![row("1a: fdivr", true)])),
         };
-        let plain = render_diff(&[view()], None, false);
-        let colored = render_diff(&[view()], None, true);
+        let plain = render_diff(&[view()], None, false, false);
+        let colored = render_diff(&[view()], None, true, false);
         let strip = |s: &str| {
             let mut out = String::new();
             let mut it = s.chars();
