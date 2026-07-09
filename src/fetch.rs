@@ -111,13 +111,15 @@ pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> anyhow::Result<()
 #[cfg_attr(windows, allow(dead_code))]
 pub fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> anyhow::Result<()> {
     let file = std::fs::File::open(archive_path)?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut decompressed = Vec::new();
-    lzma_rs::xz_decompress(&mut reader, &mut decompressed)
-        .map_err(|e| anyhow::anyhow!("xz decompress of {}: {e:?}", archive_path.display()))?;
-    let mut archive = tar::Archive::new(std::io::Cursor::new(decompressed));
+    let reader = std::io::BufReader::new(file);
+    // The upstream 7-Zip tarballs chain a BCJ x86 filter ahead of LZMA2, so the
+    // decoder has to implement the full xz filter set, not just LZMA2.
+    let decoder = lzma_rust2::XzReader::new(reader, true);
+    let mut archive = tar::Archive::new(decoder);
     std::fs::create_dir_all(dest_dir)?;
-    archive.unpack(dest_dir)?;
+    archive
+        .unpack(dest_dir)
+        .map_err(|e| anyhow::anyhow!("xz decompress of {}: {e}", archive_path.display()))?;
     Ok(())
 }
 
@@ -224,27 +226,61 @@ mod tests {
         assert_eq!(extracted, "hello");
     }
 
+    /// Builds a `tar.xz` holding a single `7zzs` member, optionally chaining a
+    /// BCJ x86 filter ahead of LZMA2 the way the upstream 7-Zip tarballs do.
+    fn build_tar_xz(bcj_x86: bool) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_cksum();
+            builder.append_data(&mut header, "7zzs", &b"hello"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+        let mut options = lzma_rust2::XzOptions::with_preset(1);
+        if bcj_x86 {
+            options.prepend_pre_filter(lzma_rust2::FilterType::BcjX86, 0);
+        }
+        let mut writer = lzma_rust2::XzWriter::new(Vec::new(), options).unwrap();
+        std::io::copy(&mut std::io::Cursor::new(&tar_bytes), &mut writer).unwrap();
+        writer.finish().unwrap()
+    }
+
+    /// An xz stream header is 12 bytes; the block header then starts with its
+    /// own size byte, a flags byte whose low 2 bits hold `filter_count - 1`,
+    /// and the first filter's id. See the xz file format spec, section 3.1.
+    fn first_block_filters(xz_bytes: &[u8]) -> (usize, u8) {
+        let filter_count = (xz_bytes[13] & 0b11) as usize + 1;
+        (filter_count, xz_bytes[14])
+    }
+
     #[test]
     fn extract_tar_xz_roundtrips() {
         let dir = temp_dir("tarxz");
         let archive_path = dir.join("test.tar.xz");
-        {
-            let mut tar_bytes = Vec::new();
-            {
-                let mut builder = tar::Builder::new(&mut tar_bytes);
-                let mut header = tar::Header::new_gnu();
-                header.set_size(5);
-                header.set_cksum();
-                builder.append_data(&mut header, "7zzs", &b"hello"[..]).unwrap();
-                builder.finish().unwrap();
-            }
-            let xz_bytes = {
-                let mut compressed = Vec::new();
-                lzma_rs::xz_compress(&mut std::io::Cursor::new(&tar_bytes), &mut compressed).unwrap();
-                compressed
-            };
-            std::fs::write(&archive_path, xz_bytes).unwrap();
-        }
+        std::fs::write(&archive_path, build_tar_xz(false)).unwrap();
+
+        let extract_dir = dir.join("extracted");
+        extract_tar_xz(&archive_path, &extract_dir).unwrap();
+        let extracted = std::fs::read_to_string(extract_dir.join("7zzs")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(extracted, "hello");
+    }
+
+    // Regression: the 7-Zip linux tarballs are BCJ-x86-filtered, which the old
+    // LZMA2-only decoder rejected with `Unknown filter id 4`.
+    #[test]
+    fn extract_tar_xz_roundtrips_with_bcj_x86_filter() {
+        let dir = temp_dir("tarxz-bcj");
+        let archive_path = dir.join("test.tar.xz");
+        let xz_bytes = build_tar_xz(true);
+
+        // Guard the fixture itself: a plain LZMA2 stream would make this test
+        // pass without ever exercising the filter chain that caused the bug.
+        assert_eq!(first_block_filters(&xz_bytes), (2, 0x04), "fixture is not BCJ x86 + LZMA2");
+        std::fs::write(&archive_path, xz_bytes).unwrap();
+
         let extract_dir = dir.join("extracted");
         extract_tar_xz(&archive_path, &extract_dir).unwrap();
         let extracted = std::fs::read_to_string(extract_dir.join("7zzs")).unwrap();
