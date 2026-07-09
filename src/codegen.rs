@@ -148,8 +148,32 @@ pub struct CompileCommandEntry {
     pub arguments: Vec<String>,
 }
 
-fn cxxflags_dict(config: &Config) -> &IndexMap<String, FlagSet> {
-    config.cxxflags.as_ref().unwrap_or(&config.cflags)
+/// Returns the C++ compile flags for a unit by merging `cflags` and `cxxflags`:
+/// all flags from `cflags[key]` (the shared base) are always included, and any
+/// additional flags that appear in `cxxflags[key]` but not already in the cflags
+/// set are appended after. When `cxxflags` is `None`, this is equivalent to
+/// `get_flags(key, cflags, ...)`.
+///
+/// This prevents per-unit flags declared only in `cflags` (e.g. `/GX`, `/G6`)
+/// from being silently dropped when `cxxflags` is also present in the config.
+pub fn get_cxx_flags_merged(
+    flags_key: &str,
+    cflags: &IndexMap<String, FlagSet>,
+    cxxflags: Option<&IndexMap<String, FlagSet>>,
+    compiler_root: &str,
+    sdk_root: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut result = get_flags(flags_key, cflags, compiler_root, sdk_root)?;
+    if let Some(cxx_dict) = cxxflags {
+        let extra = get_flags(flags_key, cxx_dict, compiler_root, sdk_root)?;
+        let seen: std::collections::HashSet<String> = result.iter().cloned().collect();
+        for f in extra {
+            if !seen.contains(&f) {
+                result.push(f);
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Parses a single line for a local `#include "..."` directive, returning the
@@ -221,7 +245,6 @@ pub fn write_ninja(config_id: &str, config: &Config, objects: &Objects) -> anyho
     let cxx = &config.compiler;
     let cc = config.compiler_c.as_deref().unwrap_or(cxx);
     let is_msvc = cxx.to_lowercase().ends_with("cl.exe");
-    let cxx_dict = cxxflags_dict(config);
 
     out.push_str(&format!("cc = {cc}\n\n"));
     out.push_str(&format!("cxx = {cxx}\n\n"));
@@ -245,7 +268,7 @@ pub fn write_ninja(config_id: &str, config: &Config, objects: &Objects) -> anyho
     let mut all_objs = Vec::new();
     for (lib_name, lib) in objects {
         let c_flags = get_flags(&lib.cflags, &config.cflags, &config.compiler_root, &config.sdk_root)?.join(" ");
-        let cxx_flags = get_flags(&lib.cflags, cxx_dict, &config.compiler_root, &config.sdk_root)?.join(" ");
+        let cxx_flags = get_cxx_flags_merged(&lib.cflags, &config.cflags, config.cxxflags.as_ref(), &config.compiler_root, &config.sdk_root)?.join(" ");
 
         for src in lib.objects.keys() {
             let obj = get_target_path(config_id, lib_name, src);
@@ -326,7 +349,6 @@ pub fn write_compile_commands(config: &Config, objects: &Objects) -> anyhow::Res
     let cxx = &config.compiler;
     let cc = config.compiler_c.as_deref().unwrap_or(cxx);
     let is_msvc = cxx.to_lowercase().ends_with("cl.exe");
-    let cxx_dict = cxxflags_dict(config);
 
     let directory = lexical_absolute(Path::new(SOURCE_ROOT))?.to_string_lossy().to_string();
     let mut entries = Vec::new();
@@ -336,7 +358,7 @@ pub fn write_compile_commands(config: &Config, objects: &Objects) -> anyhow::Res
             .iter()
             .map(|f| strip_arg_quotes(f))
             .collect();
-        let cxx_flags: Vec<String> = get_flags(&lib.cflags, cxx_dict, &config.compiler_root, &config.sdk_root)?
+        let cxx_flags: Vec<String> = get_cxx_flags_merged(&lib.cflags, &config.cflags, config.cxxflags.as_ref(), &config.compiler_root, &config.sdk_root)?
             .iter()
             .map(|f| strip_arg_quotes(f))
             .collect();
@@ -553,6 +575,76 @@ mod generation_tests {
         assert_eq!(unit.metadata.progress_categories, vec!["A.dll"]);
         assert_eq!(file.progress_categories.len(), 1);
         assert_eq!(file.progress_categories[0].id, "A.dll");
+    }
+
+    /// Regression test for issue #9: when both `cflags` and `cxxflags` are
+    /// present, per-unit flags that appear only in `cflags` (e.g. /GX, /G6)
+    /// must still be emitted into the cxxflags line of build.ninja.
+    #[test]
+    fn write_ninja_merges_cflags_into_cxxflags_per_unit() {
+        let json = r#"{
+            "progress_categories": {"Common.dll": "Common.dll"},
+            "compiler": "build/msvc6.0/BIN/CL.EXE",
+            "compiler_c": "build/msvc6.0/BIN/CL.EXE",
+            "compiler_root": "build/msvc6.0",
+            "sdk_root": "build/msvc6.0",
+            "cflags": {
+                "decomp": {"flags": ["/O2", "/DDECOMP"]},
+                "Common.dll": {"base": "decomp", "flags": ["/D_DLL", "/GX", "/G6"]}
+            },
+            "cxxflags": {
+                "decomp": {"flags": ["/O2", "/DDECOMP"]},
+                "Common.dll": {"base": "decomp", "flags": ["/D_DLL"]}
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let objects_json = r#"{
+            "Common.dll": {
+                "progress_category": "Common.dll",
+                "cflags": "Common.dll",
+                "idapro": "config/x/splits/Common.dll.json",
+                "objects": {"src/Common.dll.cpp": "Common.dll.obj"}
+            }
+        }"#;
+        let objects: Objects = serde_json::from_str(objects_json).unwrap();
+        let ninja = write_ninja("cfgid", &config, &objects).unwrap();
+        // /GX and /G6 from cflags.Common.dll must appear in the cxxflags line
+        // even though cxxflags.Common.dll only lists /D_DLL.
+        assert!(ninja.contains("/GX"), "expected /GX in: {ninja}");
+        assert!(ninja.contains("/G6"), "expected /G6 in: {ninja}");
+        assert!(ninja.contains("/D_DLL"), "expected /D_DLL in: {ninja}");
+        // No flag should appear twice.
+        let cxxflags_line = ninja.lines().find(|l| l.trim_start().starts_with("cxxflags =")).unwrap();
+        let count_ddll = cxxflags_line.matches("/D_DLL").count();
+        assert_eq!(count_ddll, 1, "/D_DLL must not be duplicated: {cxxflags_line}");
+    }
+
+    #[test]
+    fn get_cxx_flags_merged_includes_cflags_only_flags() {
+        let cflags: IndexMap<String, FlagSet> = serde_json::from_str(r#"{
+            "decomp": {"flags": ["/O2"]},
+            "unit": {"base": "decomp", "flags": ["/GX", "/G6"]}
+        }"#).unwrap();
+        let cxxflags: IndexMap<String, FlagSet> = serde_json::from_str(r#"{
+            "decomp": {"flags": ["/O2"]},
+            "unit": {"base": "decomp", "flags": ["/D_DLL"]}
+        }"#).unwrap();
+        let merged = get_cxx_flags_merged("unit", &cflags, Some(&cxxflags), "root", "sdk").unwrap();
+        assert!(merged.contains(&"/GX".to_string()), "merged: {merged:?}");
+        assert!(merged.contains(&"/G6".to_string()), "merged: {merged:?}");
+        assert!(merged.contains(&"/D_DLL".to_string()), "merged: {merged:?}");
+        // /O2 from base must not be duplicated
+        assert_eq!(merged.iter().filter(|f| f.as_str() == "/O2").count(), 1, "merged: {merged:?}");
+    }
+
+    #[test]
+    fn get_cxx_flags_merged_no_cxxflags_equals_get_flags() {
+        let cflags: IndexMap<String, FlagSet> = serde_json::from_str(r#"{
+            "unit": {"flags": ["/O2", "/GX"]}
+        }"#).unwrap();
+        let merged = get_cxx_flags_merged("unit", &cflags, None, "root", "sdk").unwrap();
+        let direct = get_flags("unit", &cflags, "root", "sdk").unwrap();
+        assert_eq!(merged, direct);
     }
 
     #[test]
