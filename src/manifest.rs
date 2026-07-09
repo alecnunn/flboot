@@ -105,11 +105,6 @@ impl SevenZip {
 #[derive(Deserialize)]
 pub struct ToolsManifest {
     pub delink: BinaryTool,
-    /// The objdiff GUI. `objdiff-cli` is deliberately absent: diffing and the
-    /// progress report run in-process via `objdiff-core`, so the CLI binary is
-    /// no longer fetched. A stale `objdiff_cli` key in `config/tools.json` is
-    /// simply ignored (no `deny_unknown_fields`).
-    pub objdiff: BinaryTool,
     pub ninja: ZipTool,
     pub msvc6: Msvc6,
     pub seven_zip: SevenZip,
@@ -133,8 +128,8 @@ pub fn load_orig_manifest(config_id: &str) -> anyhow::Result<OrigManifest> {
 mod tests {
     use super::*;
 
-    /// Mirrors a real `config/tools.json`, including the now-unused
-    /// `objdiff_cli` entry that projects still have on disk.
+    /// Mirrors a real `config/tools.json`, including the now-unused `objdiff`
+    /// and `objdiff_cli` entries that projects still have on disk.
     fn tools_fixture() -> &'static str {
         r#"{
             "delink": {
@@ -176,30 +171,27 @@ mod tests {
         assert_eq!(m.ninja.linux.entry, "ninja");
     }
 
-    /// A project whose `config/tools.json` still pins `objdiff-cli` must keep
-    /// bootstrapping: we no longer fetch or run it, and the stale key is
-    /// ignored rather than rejected. The fixture above still carries the key,
-    /// so this is what makes the removal safe to ship before projects update.
+    /// A project whose `config/tools.json` still pins `objdiff` and
+    /// `objdiff-cli` must keep bootstrapping: we no longer fetch or run either,
+    /// and the stale keys are ignored rather than rejected. The fixture above
+    /// still carries both, so this is what makes the removal safe to ship
+    /// before projects update their manifests.
     #[test]
-    fn tools_manifest_ignores_a_stale_objdiff_cli_entry() {
-        assert!(tools_fixture().contains("\"objdiff_cli\""), "fixture must retain the stale key");
+    fn tools_manifest_ignores_stale_objdiff_entries() {
+        assert!(tools_fixture().contains("\"objdiff_cli\""), "fixture must retain the stale keys");
+        assert!(tools_fixture().contains("\"objdiff\""), "fixture must retain the stale keys");
         assert!(serde_json::from_str::<ToolsManifest>(tools_fixture()).is_ok());
     }
 
-    /// ...and a manifest that has dropped the key parses just as well, which is
-    /// the shape projects will migrate to.
+    /// ...and a manifest that has dropped both keys parses just as well, which
+    /// is the shape projects will migrate to.
     #[test]
-    fn tools_manifest_parses_without_objdiff_cli() {
+    fn tools_manifest_parses_without_any_objdiff_entry() {
         let json = r#"{
             "delink": {
                 "path_names": ["delink"],
                 "windows": { "url": "https://x/delink.exe", "sha1": "AA", "dest": "build/tools/delink-windows-x86_64.exe" },
                 "linux":   { "url": "https://x/delink",     "sha1": "bb", "dest": "build/tools/delink-linux-x86_64" }
-            },
-            "objdiff": {
-                "path_names": ["objdiff"],
-                "windows": { "url": "https://x/o.exe", "sha1": "EE", "dest": "build/tools/objdiff-windows-x86_64.exe" },
-                "linux":   { "url": "https://x/o",     "sha1": "ff", "dest": "build/tools/objdiff-linux-x86_64" }
             },
             "ninja": {
                 "path_names": ["ninja"],
@@ -213,9 +205,10 @@ mod tests {
                 "linux":   { "url": "https://x/7z.tar.xz", "sha1": "ii", "archive": "build/tools/7z.tar.xz", "extract_dir": "build/tools/7z", "dest": "build/tools/7z/7zzs" }
             }
         }"#;
-        assert!(!json.contains("objdiff_cli"));
+        assert!(!json.contains("objdiff"), "migrated manifest names no objdiff tool");
         let m: ToolsManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(m.objdiff.path_names, vec!["objdiff"]);
+        assert_eq!(m.delink.path_names, vec!["delink"]);
+        assert_eq!(m.ninja.path_names, vec!["ninja"]);
     }
 
     #[test]
