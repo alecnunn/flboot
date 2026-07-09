@@ -568,4 +568,96 @@ mod generation_tests {
         let objects = fixture_objects();
         let file = write_objdiff("cfgid", &config, &objects);
         assert_eq!(file.units.len(), 1);
-        le
+        let unit = &file.units[0];
+        assert_eq!(unit.name, "src/A.dll");
+        assert_eq!(unit.target_path, "build/cfgid/delink/A.dll/A.dll.obj");
+        assert_eq!(unit.base_path, "build/cfgid/obj/A.dll/src/A.dll.obj");
+        assert_eq!(unit.metadata.progress_categories, vec!["A.dll"]);
+        assert_eq!(file.progress_categories.len(), 1);
+        assert_eq!(file.progress_categories[0].id, "A.dll");
+    }
+
+    /// Regression test for issue #9: when both `cflags` and `cxxflags` are
+    /// present, per-unit flags that appear only in `cflags` (e.g. /GX, /G6)
+    /// must still be emitted into the cxxflags line of build.ninja.
+    #[test]
+    fn write_ninja_merges_cflags_into_cxxflags_per_unit() {
+        let json = r#"{
+            "progress_categories": {"Common.dll": "Common.dll"},
+            "compiler": "build/msvc6.0/BIN/CL.EXE",
+            "compiler_c": "build/msvc6.0/BIN/CL.EXE",
+            "compiler_root": "build/msvc6.0",
+            "sdk_root": "build/msvc6.0",
+            "cflags": {
+                "decomp": {"flags": ["/O2", "/DDECOMP"]},
+                "Common.dll": {"base": "decomp", "flags": ["/D_DLL", "/GX", "/G6"]}
+            },
+            "cxxflags": {
+                "decomp": {"flags": ["/O2", "/DDECOMP"]},
+                "Common.dll": {"base": "decomp", "flags": ["/D_DLL"]}
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let objects_json = r#"{
+            "Common.dll": {
+                "progress_category": "Common.dll",
+                "cflags": "Common.dll",
+                "idapro": "config/x/splits/Common.dll.json",
+                "objects": {"src/Common.dll.cpp": "Common.dll.obj"}
+            }
+        }"#;
+        let objects: Objects = serde_json::from_str(objects_json).unwrap();
+        let ninja = write_ninja("cfgid", &config, &objects).unwrap();
+        // /GX and /G6 from cflags.Common.dll must appear in the cxxflags line
+        // even though cxxflags.Common.dll only lists /D_DLL.
+        assert!(ninja.contains("/GX"), "expected /GX in: {ninja}");
+        assert!(ninja.contains("/G6"), "expected /G6 in: {ninja}");
+        assert!(ninja.contains("/D_DLL"), "expected /D_DLL in: {ninja}");
+        // No flag should appear twice.
+        let cxxflags_line = ninja.lines().find(|l| l.trim_start().starts_with("cxxflags =")).unwrap();
+        let count_ddll = cxxflags_line.matches("/D_DLL").count();
+        assert_eq!(count_ddll, 1, "/D_DLL must not be duplicated: {cxxflags_line}");
+    }
+
+    #[test]
+    fn get_cxx_flags_merged_includes_cflags_only_flags() {
+        let cflags: IndexMap<String, FlagSet> = serde_json::from_str(r#"{
+            "decomp": {"flags": ["/O2"]},
+            "unit": {"base": "decomp", "flags": ["/GX", "/G6"]}
+        }"#).unwrap();
+        let cxxflags: IndexMap<String, FlagSet> = serde_json::from_str(r#"{
+            "decomp": {"flags": ["/O2"]},
+            "unit": {"base": "decomp", "flags": ["/D_DLL"]}
+        }"#).unwrap();
+        let merged = get_cxx_flags_merged("unit", &cflags, Some(&cxxflags), "root", "sdk").unwrap();
+        assert!(merged.contains(&"/GX".to_string()), "merged: {merged:?}");
+        assert!(merged.contains(&"/G6".to_string()), "merged: {merged:?}");
+        assert!(merged.contains(&"/D_DLL".to_string()), "merged: {merged:?}");
+        // /O2 from base must not be duplicated
+        assert_eq!(merged.iter().filter(|f| f.as_str() == "/O2").count(), 1, "merged: {merged:?}");
+    }
+
+    #[test]
+    fn get_cxx_flags_merged_no_cxxflags_equals_get_flags() {
+        let cflags: IndexMap<String, FlagSet> = serde_json::from_str(r#"{
+            "unit": {"flags": ["/O2", "/GX"]}
+        }"#).unwrap();
+        let merged = get_cxx_flags_merged("unit", &cflags, None, "root", "sdk").unwrap();
+        let direct = get_flags("unit", &cflags, "root", "sdk").unwrap();
+        assert_eq!(merged, direct);
+    }
+
+    #[test]
+    fn write_compile_commands_builds_absolute_paths_and_strips_quotes() {
+        let config = fixture_config();
+        let objects = fixture_objects();
+        let entries = write_compile_commands(&config, &objects).unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert!(entry.file.ends_with("A.dll.cpp"));
+        assert_eq!(entry.arguments[0], "build/msvc6.0/BIN/CL.EXE");
+        assert_eq!(entry.arguments[1], "/c");
+        assert!(entry.arguments.contains(&"/D_DLL".to_string()));
+        assert!(entry.arguments.last().unwrap().ends_with("A.dll.cpp"));
+    }
+}
