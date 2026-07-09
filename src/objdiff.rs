@@ -222,7 +222,10 @@ pub fn render_row(
     display_row(obj, symbol_index, ins_row, config, |segment| {
         let rendered = match segment.text {
             DiffText::Basic(s) => s.to_string(),
-            DiffText::Line(num) => format!("{num} "),
+            // Source line numbers come from our build's debug info; the delinked
+            // target has none, so emitting them would shift the two columns out
+            // of alignment against each other.
+            DiffText::Line(_) => return Ok(()),
             DiffText::Address(addr) => format!("{addr:x}:"),
             DiffText::Opcode(mnemonic, _) => format!("{mnemonic} "),
             DiffText::Argument(arg) => arg.to_string(),

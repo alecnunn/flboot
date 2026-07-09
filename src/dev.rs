@@ -280,7 +280,8 @@ fn render_one(view: &crate::objdiff::FnView) -> String {
         let ra = rr.get(i).map(|r| r.text.as_str()).unwrap_or_default();
         let changed = |r: Option<&crate::objdiff::Row>| r.is_some_and(|r| r.changed);
         let mark = if changed(lr.get(i)) || changed(rr.get(i)) { "<>" } else { "  " };
-        out.push_str(&format!("{la:<44} |{mark}| {ra}\n"));
+        out.push_str(format!("{la:<44} |{mark}| {ra}").trim_end());
+        out.push('\n');
     }
     out
 }
