@@ -1,7 +1,7 @@
 [package]
 name = "flboot"
 description = "all-in-one decomp management tooling for Freelancer"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = ["Alec Nunn <alec.nunn@gmail.com>"]
 license = "Unlicense"
