@@ -105,7 +105,10 @@ impl SevenZip {
 #[derive(Deserialize)]
 pub struct ToolsManifest {
     pub delink: BinaryTool,
-    pub objdiff_cli: BinaryTool,
+    /// The objdiff GUI. `objdiff-cli` is deliberately absent: diffing and the
+    /// progress report run in-process via `objdiff-core`, so the CLI binary is
+    /// no longer fetched. A stale `objdiff_cli` key in `config/tools.json` is
+    /// simply ignored (no `deny_unknown_fields`).
     pub objdiff: BinaryTool,
     pub ninja: ZipTool,
     pub msvc6: Msvc6,
@@ -130,6 +133,8 @@ pub fn load_orig_manifest(config_id: &str) -> anyhow::Result<OrigManifest> {
 mod tests {
     use super::*;
 
+    /// Mirrors a real `config/tools.json`, including the now-unused
+    /// `objdiff_cli` entry that projects still have on disk.
     fn tools_fixture() -> &'static str {
         r#"{
             "delink": {
@@ -169,6 +174,48 @@ mod tests {
         assert_eq!(m.msvc6.sentinel, "Bin/CL.EXE");
         assert_eq!(m.ninja.windows.entry, "ninja.exe");
         assert_eq!(m.ninja.linux.entry, "ninja");
+    }
+
+    /// A project whose `config/tools.json` still pins `objdiff-cli` must keep
+    /// bootstrapping: we no longer fetch or run it, and the stale key is
+    /// ignored rather than rejected. The fixture above still carries the key,
+    /// so this is what makes the removal safe to ship before projects update.
+    #[test]
+    fn tools_manifest_ignores_a_stale_objdiff_cli_entry() {
+        assert!(tools_fixture().contains("\"objdiff_cli\""), "fixture must retain the stale key");
+        assert!(serde_json::from_str::<ToolsManifest>(tools_fixture()).is_ok());
+    }
+
+    /// ...and a manifest that has dropped the key parses just as well, which is
+    /// the shape projects will migrate to.
+    #[test]
+    fn tools_manifest_parses_without_objdiff_cli() {
+        let json = r#"{
+            "delink": {
+                "path_names": ["delink"],
+                "windows": { "url": "https://x/delink.exe", "sha1": "AA", "dest": "build/tools/delink-windows-x86_64.exe" },
+                "linux":   { "url": "https://x/delink",     "sha1": "bb", "dest": "build/tools/delink-linux-x86_64" }
+            },
+            "objdiff": {
+                "path_names": ["objdiff"],
+                "windows": { "url": "https://x/o.exe", "sha1": "EE", "dest": "build/tools/objdiff-windows-x86_64.exe" },
+                "linux":   { "url": "https://x/o",     "sha1": "ff", "dest": "build/tools/objdiff-linux-x86_64" }
+            },
+            "ninja": {
+                "path_names": ["ninja"],
+                "windows": { "url": "https://x/ninja-win.zip",   "sha1": "GG", "archive": "build/tools/ninja-win.zip",   "entry": "ninja.exe", "dest": "build/tools/ninja.exe" },
+                "linux":   { "url": "https://x/ninja-linux.zip", "sha1": "hh", "archive": "build/tools/ninja-linux.zip", "entry": "ninja",     "dest": "build/tools/ninja" }
+            },
+            "msvc6": { "url": "https://x/msvc6.tar.gz", "dest_dir": "build/msvc6.0", "sentinel": "Bin/CL.EXE" },
+            "seven_zip": {
+                "path_names": ["7zz", "7z"],
+                "windows": { "msi_url": "https://x/7z.msi", "msi_dest": "build/tools/7z.msi", "extract_dir": "build/tools/7z", "exe_subpath": "Files/7-Zip/7z.exe" },
+                "linux":   { "url": "https://x/7z.tar.xz", "sha1": "ii", "archive": "build/tools/7z.tar.xz", "extract_dir": "build/tools/7z", "dest": "build/tools/7z/7zzs" }
+            }
+        }"#;
+        assert!(!json.contains("objdiff_cli"));
+        let m: ToolsManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.objdiff.path_names, vec!["objdiff"]);
     }
 
     #[test]

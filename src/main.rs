@@ -65,8 +65,6 @@ enum Commands {
         #[arg(long)]
         delink: Option<String>,
         #[arg(long)]
-        objdiff_cli: Option<String>,
-        #[arg(long)]
         skip_delink: bool,
         #[arg(long)]
         only: Vec<String>,
@@ -93,11 +91,10 @@ fn main() -> anyhow::Result<()> {
     std::env::set_current_dir(&repo_root)?;
 
     match cli.command {
-        Commands::Bootstrap { delink, objdiff_cli, skip_delink, only } => bootstrap::run_bootstrap(
+        Commands::Bootstrap { delink, skip_delink, only } => bootstrap::run_bootstrap(
             &cli.config_id,
             cli.config.as_deref(),
             delink.as_deref(),
-            objdiff_cli.as_deref(),
             skip_delink,
             &only,
         ),
