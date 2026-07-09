@@ -16,7 +16,7 @@ use objdiff_core::{
     diff::{
         self, DiffObjConfig, DiffObjsResult, DiffSide, InstructionDiffKind, InstructionDiffRow,
         MappingConfig, SymbolDiff,
-        display::{DiffText, display_row},
+        display::{DiffText, DiffTextColor, display_row},
     },
     obj::{self, Object},
 };
@@ -201,9 +201,53 @@ pub fn diff_unit(config_id: &str, objects: &Objects, unit: &str) -> Result<UnitD
 }
 
 /// One rendered instruction line, with whether the diff considers it changed.
+///
+/// `text` and `colored` hold the same content; `colored` additionally carries
+/// ANSI escapes. Both are kept because escapes inflate a string's byte length
+/// without occupying columns, so padding must be measured against `text`.
 pub struct Row {
     pub text: String,
+    pub colored: String,
     pub changed: bool,
+}
+
+impl Row {
+    /// The rendered form for the given color mode.
+    pub fn display(&self, color: bool) -> &str {
+        if color { &self.colored } else { &self.text }
+    }
+
+    /// Printed column width, which the escapes in `colored` do not contribute to.
+    pub fn width(&self) -> usize {
+        self.text.chars().count()
+    }
+}
+
+const RESET: &str = "\x1b[0m";
+
+/// Maps objdiff's semantic segment colors onto ANSI escapes. `Normal` is left
+/// unstyled so ordinary instruction text keeps the terminal's own foreground
+/// rather than being forced to grey.
+fn ansi_for(color: DiffTextColor) -> &'static str {
+    match color {
+        DiffTextColor::Normal => "",
+        DiffTextColor::Dim => "\x1b[2m",
+        DiffTextColor::Bright => "\x1b[97m",
+        DiffTextColor::DataFlow => "\x1b[96m",
+        DiffTextColor::Replace => "\x1b[36m",
+        DiffTextColor::Delete => "\x1b[31m",
+        DiffTextColor::Insert => "\x1b[32m",
+        // Branch arrows cycle through colors so nested branches stay tellable
+        // apart; mirror that with the six standard hues.
+        DiffTextColor::Rotating(i) => match i % 6 {
+            0 => "\x1b[35m",
+            1 => "\x1b[33m",
+            2 => "\x1b[34m",
+            3 => "\x1b[31m",
+            4 => "\x1b[32m",
+            _ => "\x1b[36m",
+        },
+    }
 }
 
 /// Renders one instruction row to text.
@@ -218,7 +262,7 @@ pub fn render_row(
     ins_row: &InstructionDiffRow,
     config: &DiffObjConfig,
 ) -> Result<Row> {
-    let mut text = String::new();
+    let mut parts: Vec<(&'static str, String)> = Vec::new();
     display_row(obj, symbol_index, ins_row, config, |segment| {
         let rendered = match segment.text {
             DiffText::Basic(s) => s.to_string(),
@@ -240,17 +284,55 @@ pub fn render_row(
             DiffText::Spacing(n) => " ".repeat(n as usize),
             DiffText::Eol => return Ok(()),
         };
-        text.push_str(&rendered);
-        for _ in rendered.len()..segment.pad_to as usize {
-            text.push(' ');
+
+        // Padding is unstyled, and counts in columns rather than bytes.
+        let pad = (segment.pad_to as usize).saturating_sub(rendered.chars().count());
+        parts.push((ansi_for(segment.color), rendered));
+        if pad > 0 {
+            parts.push(("", " ".repeat(pad)));
         }
         Ok(())
     })?;
 
-    Ok(Row {
-        text: text.trim_end().to_string(),
-        changed: ins_row.kind != InstructionDiffKind::None,
-    })
+    let (text, colored) = assemble(parts);
+    Ok(Row { text, colored, changed: ins_row.kind != InstructionDiffKind::None })
+}
+
+/// Builds a row's plain and colored forms from styled parts, trimming trailing
+/// whitespace *before* escapes are woven in.
+///
+/// Trimming the finished colored string does not work: a segment like the
+/// branch arrow renders as `" ~> "`, so its trailing space ends up inside the
+/// escape wrap and `trim_end` sees the reset sequence as the last characters.
+/// The colored row would then be one column wider than the plain one and the
+/// side-by-side separator would drift.
+fn assemble(mut parts: Vec<(&'static str, String)>) -> (String, String) {
+    while let Some((_, last)) = parts.last_mut() {
+        let trimmed = last.trim_end();
+        if trimmed.len() == last.len() {
+            break;
+        }
+        last.truncate(trimmed.len());
+        if last.is_empty() {
+            parts.pop();
+        } else {
+            break;
+        }
+    }
+
+    let mut text = String::new();
+    let mut colored = String::new();
+    for (escape, part) in &parts {
+        text.push_str(part);
+        if escape.is_empty() {
+            colored.push_str(part);
+        } else {
+            colored.push_str(escape);
+            colored.push_str(part);
+            colored.push_str(RESET);
+        }
+    }
+    (text, colored)
 }
 
 /// Renders every instruction row of a symbol.
@@ -327,6 +409,71 @@ mod tests {
     fn unit_paths_rejects_unknown_unit() {
         let objs = objects(r#"{}"#);
         assert!(unit_paths("cfgid", &objs, "nope.dll").is_err());
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Regression: a styled part ending in a space (objdiff renders the branch
+    /// arrow as `" ~> "`) put that space inside the escape wrap, so trimming
+    /// the finished colored string was a no-op and the colored row came out one
+    /// column wider than the plain one.
+    #[test]
+    fn assemble_trims_trailing_space_inside_a_styled_part() {
+        let (text, colored) = assemble(vec![
+            ("", "jl short 5".to_string()),
+            ("\x1b[35m", " ~> ".to_string()),
+        ]);
+        assert_eq!(text, "jl short 5 ~>");
+        assert_eq!(colored, "jl short 5\x1b[35m ~>\x1b[0m");
+        assert_eq!(strip_ansi(&colored), text);
+    }
+
+    /// Trailing pad parts are dropped entirely, not left as empty escapes.
+    #[test]
+    fn assemble_drops_trailing_padding_parts() {
+        let (text, colored) = assemble(vec![
+            ("\x1b[2m", "0:".to_string()),
+            ("", "   ".to_string()),
+        ]);
+        assert_eq!(text, "0:");
+        assert_eq!(colored, "\x1b[2m0:\x1b[0m");
+    }
+
+    /// Stripping escapes must always recover the plain form, whatever the mix.
+    #[test]
+    fn assemble_colored_strips_back_to_plain() {
+        let (text, colored) = assemble(vec![
+            ("\x1b[2m", "7:".to_string()),
+            ("", "  ".to_string()),
+            ("", "or ".to_string()),
+            ("\x1b[35m", "ch".to_string()),
+            ("", ", ".to_string()),
+            ("\x1b[33m", "0xfc".to_string()),
+        ]);
+        assert_eq!(strip_ansi(&colored), text);
+        assert_eq!(text, "7:  or ch, 0xfc");
+    }
+
+    #[test]
+    fn assemble_handles_only_whitespace() {
+        let (text, colored) = assemble(vec![("", "   ".to_string())]);
+        assert_eq!(text, "");
+        assert_eq!(colored, "");
     }
 
     /// A library with several objects selects the one whose objdiff unit name

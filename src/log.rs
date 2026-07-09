@@ -47,7 +47,9 @@ fn supports_color() -> bool {
     enable_windows_ansi()
 }
 
-fn color_enabled() -> bool {
+/// Whether stdout should carry ANSI escapes: a terminal, `NO_COLOR` unset, and
+/// (on Windows) virtual-terminal processing successfully enabled. Probed once.
+pub fn color_enabled() -> bool {
     static COLOR: OnceLock<bool> = OnceLock::new();
     *COLOR.get_or_init(supports_color)
 }

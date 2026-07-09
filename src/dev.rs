@@ -260,27 +260,64 @@ pub fn symbol_key(name: &str) -> String {
     }
 }
 
+const COL: usize = 44;
+const RESET: &str = "\x1b[0m";
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
+
+/// Wraps `s` in `escape` only when colorizing, so callers can build a line
+/// without branching at every field.
+fn paint(s: &str, escape: &str, color: bool) -> String {
+    if color && !escape.is_empty() {
+        format!("{escape}{s}{RESET}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// A match percentage, green at 100% and red below, so a fully-matched
+/// function is recognizable without reading the number.
+fn paint_pct(pct: Option<f32>, color: bool) -> String {
+    let text = crate::objdiff::fmt_pct(pct);
+    let escape = match pct {
+        Some(p) if p >= 100.0 => GREEN,
+        Some(_) => RED,
+        None => "",
+    };
+    paint(&text, escape, color)
+}
+
 /// Renders one function's target-vs-ours instruction table, headed by a
 /// separator line naming the symbol and its match percentages.
-fn render_one(view: &crate::objdiff::FnView) -> String {
+fn render_one(view: &crate::objdiff::FnView, color: bool) -> String {
     let empty: Vec<crate::objdiff::Row> = Vec::new();
-    let lp = crate::objdiff::fmt_pct(view.target.as_ref().and_then(|s| s.match_percent));
-    let rp = crate::objdiff::fmt_pct(view.base.as_ref().and_then(|s| s.match_percent));
+    let lp = paint_pct(view.target.as_ref().and_then(|s| s.match_percent), color);
+    let rp = paint_pct(view.base.as_ref().and_then(|s| s.match_percent), color);
 
     let mut out = String::new();
     out.push_str(&format!("==== {}  TARGET {lp}%  OURS {rp}% ====\n", view.name));
-    out.push_str(&format!("{:<44} | OURS\n", "TARGET"));
+    out.push_str(&format!("{:<COL$} | OURS\n", "TARGET"));
     out.push_str(&"-".repeat(90));
     out.push('\n');
 
     let lr = view.target.as_ref().map(|s| &s.rows).unwrap_or(&empty);
     let rr = view.base.as_ref().map(|s| &s.rows).unwrap_or(&empty);
     for i in 0..lr.len().max(rr.len()) {
-        let la = lr.get(i).map(|r| r.text.as_str()).unwrap_or_default();
-        let ra = rr.get(i).map(|r| r.text.as_str()).unwrap_or_default();
+        let (left, right) = (lr.get(i), rr.get(i));
         let changed = |r: Option<&crate::objdiff::Row>| r.is_some_and(|r| r.changed);
-        let mark = if changed(lr.get(i)) || changed(rr.get(i)) { "<>" } else { "  " };
-        out.push_str(format!("{la:<44} |{mark}| {ra}").trim_end());
+        let mark = if changed(left) || changed(right) {
+            paint("<>", RED, color)
+        } else {
+            "  ".to_string()
+        };
+
+        // Pad against the row's printed width: `colored` carries escapes that
+        // cost bytes but no columns, so `{:<44}` on it would misalign.
+        let la = left.map(|r| r.display(color)).unwrap_or_default();
+        let pad = COL.saturating_sub(left.map(|r| r.width()).unwrap_or(0));
+        let ra = right.map(|r| r.display(color)).unwrap_or_default();
+
+        out.push_str(format!("{la}{:pad$} |{mark}| {ra}", "").trim_end());
         out.push('\n');
     }
     out
@@ -288,17 +325,20 @@ fn render_one(view: &crate::objdiff::FnView) -> String {
 
 /// Renders the diff for a single named function, or -- when `symbol` is `None`
 /// -- every function in the target, each under its own separator header.
-fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>) -> String {
+fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>, color: bool) -> String {
     if views.is_empty() {
         return match symbol {
             // A requested symbol that matched nothing still gets a header, so
             // the caller sees the dashes rather than silence.
-            Some(sym) => render_one(&crate::objdiff::FnView {
-                name: sym.to_string(),
-                size: 0,
-                target: None,
-                base: None,
-            }),
+            Some(sym) => render_one(
+                &crate::objdiff::FnView {
+                    name: sym.to_string(),
+                    size: 0,
+                    target: None,
+                    base: None,
+                },
+                color,
+            ),
             None => "no functions found in target\n".to_string(),
         };
     }
@@ -308,7 +348,7 @@ fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>) -> String
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&render_one(view));
+        out.push_str(&render_one(view, color));
     }
     out
 }
@@ -316,18 +356,18 @@ fn render_diff(views: &[crate::objdiff::FnView], symbol: Option<&str>) -> String
 /// Diff one function (`symbol = Some`) or every function in the unit
 /// (`symbol = None`). `unit_arg` accepts any form `norm_unit` understands,
 /// including the object-file name (e.g. "x86math.dll.obj").
-pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: Option<&str>) -> anyhow::Result<()> {
+pub fn cmd_diff(config_id: &str, unit_arg: &str, symbol: Option<&str>, color: bool) -> anyhow::Result<()> {
     let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
     let unit = norm_unit(&objects, unit_arg)?;
 
     let unit_diff = crate::objdiff::diff_unit(config_id, &objects, &unit)?;
     let views = unit_diff.function_views(symbol)?;
 
-    print!("{}", render_diff(&views, symbol));
+    print!("{}", render_diff(&views, symbol, color));
     Ok(())
 }
 
-pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String]) -> anyhow::Result<()> {
+pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String], color: bool) -> anyhow::Result<()> {
     if symbols.is_empty() {
         anyhow::bail!("dis needs at least one symbol");
     }
@@ -348,7 +388,7 @@ pub fn cmd_dis(config_id: &str, unit_arg: &str, symbols: &[String]) -> anyhow::R
             continue;
         };
         for row in &target.rows {
-            println!("  {}", row.text);
+            println!("  {}", row.display(color));
         }
     }
     Ok(())
@@ -586,8 +626,14 @@ mod tests {
         assert_eq!(norm_unit(&objects, "src/x86math.dll.obj").unwrap(), "x86math.dll");
     }
 
+    /// A row whose colored form carries an escape, so tests can tell the two
+    /// representations apart.
     fn row(text: &str, changed: bool) -> crate::objdiff::Row {
-        crate::objdiff::Row { text: text.to_string(), changed }
+        crate::objdiff::Row {
+            text: text.to_string(),
+            colored: format!("\x1b[36m{text}\x1b[0m"),
+            changed,
+        }
     }
 
     fn side(pct: f32, rows: Vec<crate::objdiff::Row>) -> crate::objdiff::SideView {
@@ -619,7 +665,7 @@ mod tests {
 
     #[test]
     fn render_diff_single_symbol_shows_only_that_function() {
-        let out = render_diff(&[foo_view()], Some("?foo@@YAXXZ"));
+        let out = render_diff(&[foo_view()], Some("?foo@@YAXXZ"), false);
         assert!(out.contains("==== ?foo@@YAXXZ"), "{out}");
         assert!(out.contains("TARGET 100.00%"), "{out}");
         assert!(out.contains("OURS 87.50%"), "{out}");
@@ -631,7 +677,7 @@ mod tests {
     /// only in our build still flags.
     #[test]
     fn render_diff_marks_row_changed_on_either_side() {
-        let out = render_diff(&[foo_view()], None);
+        let out = render_diff(&[foo_view()], None, false);
         let line = out.lines().find(|l| l.contains("push ebp")).unwrap();
         assert!(line.contains("<>"), "changed row must be marked: {line}");
     }
@@ -644,13 +690,13 @@ mod tests {
             target: Some(side(100.0, vec![row("0: ret", false)])),
             base: Some(side(100.0, vec![row("0: ret", false)])),
         };
-        let line = render_diff(&[view], None).lines().find(|l| l.contains("ret")).unwrap().to_string();
+        let line = render_diff(&[view], None, false).lines().find(|l| l.contains("ret")).unwrap().to_string();
         assert!(!line.contains("<>"), "unchanged row must not be marked: {line}");
     }
 
     #[test]
     fn render_diff_all_shows_every_target_function_with_separators() {
-        let out = render_diff(&[foo_view(), bar_view()], None);
+        let out = render_diff(&[foo_view(), bar_view()], None, false);
         assert_eq!(out.matches("==== ").count(), 2, "one separator per function: {out}");
         assert!(out.contains("==== ?foo@@YAXXZ"), "{out}");
         assert!(out.contains("==== ?bar@@YAXXZ"), "{out}");
@@ -661,7 +707,7 @@ mod tests {
 
     #[test]
     fn render_diff_missing_symbol_renders_dashes() {
-        let out = render_diff(&[], Some("?nope@@YAXXZ"));
+        let out = render_diff(&[], Some("?nope@@YAXXZ"), false);
         assert!(out.contains("==== ?nope@@YAXXZ"), "{out}");
         assert!(out.contains("TARGET -%"), "{out}");
         assert!(out.contains("OURS -%"), "{out}");
@@ -669,6 +715,62 @@ mod tests {
 
     #[test]
     fn render_diff_all_with_no_target_functions_reports_empty() {
-        assert!(render_diff(&[], None).contains("no functions found"));
+        assert!(render_diff(&[], None, false).contains("no functions found"));
+    }
+
+    #[test]
+    fn render_diff_emits_no_escapes_when_color_disabled() {
+        let out = render_diff(&[foo_view()], None, false);
+        assert!(!out.contains('\x1b'), "plain output must have no escapes: {out:?}");
+    }
+
+    #[test]
+    fn render_diff_emits_escapes_when_color_enabled() {
+        let out = render_diff(&[foo_view()], None, true);
+        assert!(out.contains('\x1b'), "colored output must carry escapes");
+        // Row content is styled by objdiff's own segment colors; the fixture
+        // wraps the whole row, real rows are styled per segment.
+        assert!(out.contains("\x1b[36m0: push ebp\x1b[0m"), "{out:?}");
+    }
+
+    /// The alignment invariant: escapes cost bytes but no columns, so the
+    /// separator must land in the same column with and without color.
+    #[test]
+    fn color_does_not_shift_the_column_separator() {
+        let strip = |s: &str| {
+            let mut out = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+
+        let plain = render_diff(&[foo_view()], None, false);
+        let colored = render_diff(&[foo_view()], None, true);
+        assert_eq!(strip(&colored), plain, "stripping escapes must recover the plain rendering");
+    }
+
+    /// A 100% match reads green, anything less reads red.
+    #[test]
+    fn percentages_are_painted_by_match_state() {
+        let out = render_diff(&[foo_view()], None, true);
+        assert!(out.contains("\x1b[32m100.00\x1b[0m"), "100% should be green: {out:?}");
+        assert!(out.contains("\x1b[31m87.50\x1b[0m"), "sub-100% should be red: {out:?}");
+    }
+
+    /// An absent side has no percentage to paint, so `-` stays unstyled.
+    #[test]
+    fn absent_side_percentage_is_unpainted() {
+        let out = render_diff(&[bar_view()], None, true);
+        assert!(out.contains("OURS -%"), "absent side should render bare dash: {out:?}");
     }
 }

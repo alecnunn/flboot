@@ -9,7 +9,26 @@ mod dev;
 mod claims;
 mod manifest;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// When to colorize output. `auto` colorizes only when stdout is a terminal
+/// and NO_COLOR is unset; `always` is for piping into a pager like `less -R`.
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    fn enabled(self) -> bool {
+        match self {
+            ColorChoice::Auto => log::color_enabled(),
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "fl", version, about = "Unified bootstrap + dev-loop tool for the Freelancer decomp")]
@@ -19,6 +38,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     config: Option<String>,
+
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    color: ColorChoice,
 
     #[command(subcommand)]
     command: Commands,
@@ -71,8 +93,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Delink { unit } => dev::cmd_delink(&cli.config_id, &unit),
         Commands::Claim { unit, renames } => dev::cmd_claim(&cli.config_id, &unit, &renames),
         Commands::Claims { units } => claims::cmd_claims(&cli.config_id, &units),
-        Commands::Diff { unit, symbol } => dev::cmd_diff(&cli.config_id, &unit, symbol.as_deref()),
-        Commands::Dis { unit, symbols } => dev::cmd_dis(&cli.config_id, &unit, &symbols),
+        Commands::Diff { unit, symbol } => dev::cmd_diff(&cli.config_id, &unit, symbol.as_deref(), cli.color.enabled()),
+        Commands::Dis { unit, symbols } => dev::cmd_dis(&cli.config_id, &unit, &symbols, cli.color.enabled()),
         Commands::Progress { units } => dev::cmd_progress(&cli.config_id, &units),
     }
 }
