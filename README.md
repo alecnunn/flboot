@@ -101,6 +101,26 @@ Releases are cut automatically by [release-plz](https://release-plz.dev/): a
 [conventional commits](https://www.conventionalcommits.org/); merging it tags
 the commit and publishes a GitHub Release with the `fl` binaries attached.
 
+## Special Thanks
+
+`fl` is built on other people's work, and would not exist without it.
+
+- **[Luke Street](https://github.com/encounter)** for
+  [objdiff](https://github.com/encounter/objdiff). Its engine, `objdiff-core`, does
+  the actual diffing behind `fl diff`, `fl dis`, and `fl progress` — symbol matching,
+  instruction rendering, and the match percentages the whole workflow is measured by.
+  `fl` embeds it directly; the side-by-side view, the colored operands, and the branch
+  arrows are all rendering on top of what objdiff already knew. Dual-licensed
+  MIT OR Apache-2.0.
+- **[HaydnTrigg](https://github.com/HaydnTrigg)** for
+  [delink](https://github.com/HaydnTrigg/delink), which carves the target objects out
+  of the original binaries — the ground truth every match percentage is compared
+  against — and for the [objdiff fork](https://github.com/HaydnTrigg/objdiff) that
+  keeps the tooling working for this project. Apache-2.0.
+
+Thanks also to the wider decompilation community, whose conventions for
+delink/objdiff/ninja projects `fl` simply wires together.
+
 ## License
 
 Released into the public domain under [The Unlicense](LICENSE).
