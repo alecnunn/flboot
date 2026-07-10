@@ -118,7 +118,7 @@ mod resolve_tool_tests {
 
 use crate::manifest::{BinaryEntry, BinaryTool, SevenZip, ToolsManifest, ZipEntry, ZipTool};
 
-/// Downloads a single-binary tool (delink/objdiff-cli/objdiff) and marks it
+/// Downloads a single-binary tool (delink) and marks it
 /// executable (no-op on Windows). Platform difference lives entirely in the
 /// manifest entry, so this is not cfg-split.
 fn download_binary(entry: &BinaryEntry, dest: &Path) -> anyhow::Result<()> {
@@ -151,18 +151,6 @@ pub fn resolve_delink(
     resolve_binary(&manifest.delink, override_path, "delink", on_miss)
 }
 
-pub fn resolve_objdiff_cli(
-    manifest: &ToolsManifest,
-    override_path: Option<&str>,
-    on_miss: ToolMiss,
-) -> anyhow::Result<PathBuf> {
-    resolve_binary(&manifest.objdiff_cli, override_path, "objdiff-cli", on_miss)
-}
-
-pub fn resolve_objdiff(manifest: &ToolsManifest, on_miss: ToolMiss) -> anyhow::Result<PathBuf> {
-    resolve_binary(&manifest.objdiff, None, "objdiff", on_miss)
-}
-
 /// Downloads a zip-packaged tool (ninja), extracts one entry, and marks it
 /// executable (no-op on Windows). Not cfg-split -- platform data is in the manifest.
 fn download_zip_tool(entry: &ZipEntry, dest: &Path) -> anyhow::Result<()> {
@@ -182,14 +170,8 @@ pub fn resolve_ninja(manifest: &ToolsManifest, on_miss: ToolMiss) -> anyhow::Res
     })
 }
 
-pub fn ensure_tools(
-    manifest: &ToolsManifest,
-    delink_override: Option<&str>,
-    objdiff_cli_override: Option<&str>,
-) -> anyhow::Result<()> {
+pub fn ensure_tools(manifest: &ToolsManifest, delink_override: Option<&str>) -> anyhow::Result<()> {
     resolve_delink(manifest, delink_override, ToolMiss::Download)?;
-    resolve_objdiff_cli(manifest, objdiff_cli_override, ToolMiss::Download)?;
-    resolve_objdiff(manifest, ToolMiss::Download)?;
     resolve_ninja(manifest, ToolMiss::Download)?;
 
     let msvc6 = &manifest.msvc6;
@@ -402,7 +384,6 @@ pub fn run_bootstrap(
     config_id: &str,
     config_override: Option<&str>,
     delink_override: Option<&str>,
-    objdiff_cli_override: Option<&str>,
     skip_delink: bool,
     only: &[String],
 ) -> anyhow::Result<()> {
@@ -417,7 +398,7 @@ pub fn run_bootstrap(
     let tools = crate::manifest::load_tools_manifest()?;
     let orig = crate::manifest::load_orig_manifest(config_id)?;
 
-    ensure_tools(&tools, delink_override, objdiff_cli_override)?;
+    ensure_tools(&tools, delink_override)?;
     ensure_orig(config_id, &tools, &orig)?;
     verify_orig(config_id, &orig)?;
 
