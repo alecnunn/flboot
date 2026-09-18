@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/alecnunn/flboot/compare/v0.2.0...v0.2.1) - 2026-09-18
+
+### Fixed
+
+- *(dev)* case-resolve compiler exe path for Wine's case-sensitive loader ([#26](https://github.com/alecnunn/flboot/pull/26))
+
 ## [0.2.0](https://github.com/alecnunn/flboot/compare/v0.1.3...v0.2.0) - 2026-07-10
 
 ### Added
