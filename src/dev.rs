@@ -120,6 +120,41 @@ fn compiler_command(exe: &str) -> anyhow::Result<std::process::Command> {
     Ok(cmd)
 }
 
+/// Windows paths are case-insensitive, so a config written on/for Windows may
+/// spell `Bin/CL.EXE` as `BIN/CL.EXE`. Wine's loader opens the target
+/// Unix file case-sensitively, so re-resolve each path component against the
+/// directory listing before handing it to Wine. Returns the input unchanged
+/// when it already exists or a component has no case-insensitive match
+/// (letting Wine report the original error).
+#[cfg(unix)]
+fn resolve_existing_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    let mut resolved = PathBuf::new();
+    for comp in path.components() {
+        let next = resolved.join(comp);
+        if next.exists() {
+            resolved = next;
+            continue;
+        }
+        let matched = std::fs::read_dir(&resolved)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.file_name().eq_ignore_ascii_case(comp.as_os_str()))
+                    .map(|e| e.path())
+            });
+        resolved = matched.unwrap_or(next);
+    }
+    resolved
+}
+
+#[cfg(windows)]
+fn resolve_existing_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
 pub fn cmd_build(config_id: &str, unit_args: &[String]) -> anyhow::Result<()> {
     let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
     let targets: Vec<String> = unit_args
@@ -162,7 +197,7 @@ pub fn cmd_build(config_id: &str, unit_args: &[String]) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("creating output dir {}: {e}", parent.display()))?;
         }
         let mut command = if parts[0].to_lowercase().ends_with("cl.exe") {
-            parts[0] = repo_root.join(&parts[0]).to_string_lossy().to_string();
+            parts[0] = resolve_existing_path(&repo_root.join(&parts[0])).to_string_lossy().to_string();
             compiler_command(&parts[0])?
         } else {
             std::process::Command::new(&parts[0])
