@@ -36,6 +36,13 @@ invokes the compiler directly. On Linux it runs MSVC 6.0 under
 [Wine](https://www.winehq.org/), so `wine` must be on your `PATH` for the
 `build` command (`bootstrap` and the diff/report commands do not need it).
 
+`fl build` runs the build itself. It reads the generated `build.ninja` with an
+embedded [shuriken](https://github.com/alecnunn/shuriken) engine, so it
+recompiles only what changed, compiles independent units in parallel (`-j` to
+choose how many), and needs no `ninja` binary on your `PATH`. The generated
+`build.ninja` stays a normal manifest, so `ninja` still works on it if you
+prefer.
+
 ## Usage
 
 `fl` is run from inside a decomp repository — it locates the repo root by
@@ -46,7 +53,7 @@ walking up to the enclosing `.git` directory, then reads its configuration from
 # Fetch tools + original binaries, split libraries, generate build files:
 fl bootstrap
 
-# Compile one or more units with the exact flags ninja would use:
+# Compile one or more units (only what changed, in parallel):
 fl build x86math
 
 # Regenerate a unit's target object from its delink/split config:
@@ -119,7 +126,7 @@ the commit and publishes a GitHub Release with the `fl` binaries attached.
   keeps the tooling working for this project. Apache-2.0.
 
 Thanks also to the wider decompilation community, whose conventions for
-delink/objdiff/ninja projects `fl` simply wires together.
+delink/objdiff projects `fl` simply wires together.
 
 ## License
 

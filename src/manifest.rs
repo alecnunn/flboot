@@ -29,34 +29,6 @@ impl BinaryTool {
 }
 
 #[derive(Deserialize)]
-pub struct ZipEntry {
-    pub url: String,
-    pub sha1: Option<String>,
-    pub archive: String,
-    pub entry: String,
-    pub dest: String,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-pub struct ZipTool {
-    pub path_names: Vec<String>,
-    pub windows: ZipEntry,
-    pub linux: ZipEntry,
-}
-
-impl ZipTool {
-    #[cfg(windows)]
-    pub fn current(&self) -> &ZipEntry {
-        &self.windows
-    }
-    #[cfg(unix)]
-    pub fn current(&self) -> &ZipEntry {
-        &self.linux
-    }
-}
-
-#[derive(Deserialize)]
 pub struct Msvc6 {
     pub url: String,
     pub sha1: Option<String>,
@@ -105,7 +77,6 @@ impl SevenZip {
 #[derive(Deserialize)]
 pub struct ToolsManifest {
     pub delink: BinaryTool,
-    pub ninja: ZipTool,
     pub msvc6: Msvc6,
     pub seven_zip: SevenZip,
 }
@@ -167,19 +138,19 @@ mod tests {
         assert_eq!(m.delink.path_names, vec!["delink"]);
         assert_eq!(m.seven_zip.path_names, vec!["7zz", "7z"]);
         assert_eq!(m.msvc6.sentinel, "Bin/CL.EXE");
-        assert_eq!(m.ninja.windows.entry, "ninja.exe");
-        assert_eq!(m.ninja.linux.entry, "ninja");
     }
 
-    /// A project whose `config/tools.json` still pins `objdiff` and
-    /// `objdiff-cli` must keep bootstrapping: we no longer fetch or run either,
-    /// and the stale keys are ignored rather than rejected. The fixture above
-    /// still carries both, so this is what makes the removal safe to ship
-    /// before projects update their manifests.
+    /// A project whose `config/tools.json` still pins tools we no longer fetch
+    /// -- `objdiff`/`objdiff-cli` (now objdiff-core, in-process) and `ninja`
+    /// (now the embedded build engine) -- must keep bootstrapping: the stale
+    /// keys are ignored rather than rejected. The fixture above still carries
+    /// all three, so this is what makes the removals safe to ship before
+    /// projects update their manifests.
     #[test]
-    fn tools_manifest_ignores_stale_objdiff_entries() {
-        assert!(tools_fixture().contains("\"objdiff_cli\""), "fixture must retain the stale keys");
-        assert!(tools_fixture().contains("\"objdiff\""), "fixture must retain the stale keys");
+    fn tools_manifest_ignores_stale_tool_entries() {
+        for stale in ["\"objdiff_cli\"", "\"objdiff\"", "\"ninja\""] {
+            assert!(tools_fixture().contains(stale), "fixture must retain {stale}");
+        }
         assert!(serde_json::from_str::<ToolsManifest>(tools_fixture()).is_ok());
     }
 
@@ -208,7 +179,6 @@ mod tests {
         assert!(!json.contains("objdiff"), "migrated manifest names no objdiff tool");
         let m: ToolsManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.delink.path_names, vec!["delink"]);
-        assert_eq!(m.ninja.path_names, vec!["ninja"]);
     }
 
     #[test]

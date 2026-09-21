@@ -1,5 +1,8 @@
 use crate::model::Objects;
 
+/// The build manifest `fl bootstrap` generates and `fl build` consumes.
+pub const NINJA_MANIFEST: &str = "build.ninja";
+
 /// Accepts "x86math", "x86math.dll", "src/x86math.dll.cpp", and the object-file
 /// forms "x86math.dll.obj" / "src/x86math.dll.obj" -> "x86math.dll".
 pub fn norm_unit(objects: &Objects, name: &str) -> anyhow::Result<String> {
@@ -72,52 +75,38 @@ fn strip_arg_quotes(flag: &str) -> String {
     }
 }
 
-/// Extracts a compile command's output object path from its (already
-/// quote-stripped) tokens: MSVC's `/Fo<path>` or the portable `-o <path>`.
-/// Needed because `fl build` runs ninja's command lines directly instead
-/// of via ninja, so nothing creates the output's parent directory the way
-/// ninja would -- and CL.EXE's /Fo does not create it, failing with C1083.
-fn compile_output_path(parts: &[String]) -> Option<std::path::PathBuf> {
-    for (i, p) in parts.iter().enumerate() {
-        if let Some(rest) = p.strip_prefix("/Fo")
-            && !rest.is_empty()
-        {
-            return Some(std::path::PathBuf::from(rest));
-        }
-        if p == "-o"
-            && let Some(next) = parts.get(i + 1)
-        {
-            return Some(std::path::PathBuf::from(next));
-        }
-    }
-    None
-}
-
 /// Invokes the compiler directly on Windows; wraps it with `wine` everywhere
-/// else, since MSVC6 has no non-Windows build. UNVERIFIED: written from
-/// documented Wine behavior (`wine <path-to-windows-exe>` with a Unix
-/// working directory Wine translates transparently) without access to a
-/// real Linux/Wine machine to test against -- every argument passed to the
-/// compiler is already relative to the repo root (see codegen.rs's
-/// SOURCE_ROOT convention), so only this function's own `exe` argument is
-/// ever an absolute path, and it becomes Wine's own target rather than a
-/// compiler argument needing translation.
+/// else, since MSVC6 has no non-Windows build. Every argument in a generated
+/// command line is relative to the repo root (see codegen.rs's SOURCE_ROOT
+/// convention), so only `exe` is ever an absolute path, and it becomes Wine's
+/// own target rather than a compiler argument needing translation.
 #[cfg(windows)]
-fn compiler_command(exe: &str) -> anyhow::Result<std::process::Command> {
-    Ok(std::process::Command::new(exe))
+fn compiler_command(exe: &str) -> std::process::Command {
+    std::process::Command::new(exe)
 }
 
 #[cfg(unix)]
-fn compiler_command(exe: &str) -> anyhow::Result<std::process::Command> {
-    which::which("wine").map_err(|_| {
+fn compiler_command(exe: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("wine");
+    cmd.arg(exe);
+    cmd
+}
+
+/// Checked once per build rather than per command, so a missing Wine is
+/// reported plainly instead of as N identical spawn failures.
+#[cfg(unix)]
+fn ensure_compiler_host() -> anyhow::Result<()> {
+    which::which("wine").map(|_| ()).map_err(|_| {
         anyhow::anyhow!(
             "MSVC6 compilation requires Wine on non-Windows platforms; install it \
              (e.g. `apt install wine`) and ensure `wine` is on PATH"
         )
-    })?;
-    let mut cmd = std::process::Command::new("wine");
-    cmd.arg(exe);
-    Ok(cmd)
+    })
+}
+
+#[cfg(windows)]
+fn ensure_compiler_host() -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Windows paths are case-insensitive, so a config written on/for Windows may
@@ -155,65 +144,83 @@ fn resolve_existing_path(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
-pub fn cmd_build(config_id: &str, unit_args: &[String]) -> anyhow::Result<()> {
+/// Turns one command line from the manifest into a process.
+///
+/// This is the only Freelancer-specific part of running a build: the engine
+/// decides *what* to run, this decides *how*. MSVC command lines quote
+/// arguments Windows-style, and the compiler is a Windows binary that needs
+/// Wine plus a case-corrected path (a config written for Windows may spell
+/// `Bin/CL.EXE` as `BIN/CL.EXE`). Commands are run directly rather than through
+/// a shell, exactly as `fl build` always has.
+fn launch_compile(repo_root: &std::path::Path, command: &str) -> std::process::Command {
+    let mut parts: Vec<String> = shlex_split_non_posix(command).into_iter().map(|p| strip_arg_quotes(&p)).collect();
+    if parts.is_empty() {
+        // Nothing to run; let the spawn fail and be reported against the edge.
+        return std::process::Command::new("");
+    }
+
+    let mut command = if parts[0].to_lowercase().ends_with("cl.exe") {
+        parts[0] = resolve_existing_path(&repo_root.join(&parts[0])).to_string_lossy().to_string();
+        compiler_command(&parts[0])
+    } else {
+        std::process::Command::new(&parts[0])
+    };
+    command.args(&parts[1..]);
+    command
+}
+
+/// Compiles `unit_args` (or every unit, when empty) with the embedded build
+/// engine, reading the same `build.ninja` that `fl bootstrap` generates.
+///
+/// The engine owns the dependency graph: it decides what is out of date, runs
+/// independent compiles in parallel, creates output directories, and records
+/// what it ran in `.ninja_log` so the next build only redoes what changed. `fl`
+/// supplies the launcher above and nothing else.
+pub fn cmd_build(config_id: &str, unit_args: &[String], jobs: Option<usize>) -> anyhow::Result<()> {
     let objects = crate::model::load_objects(&crate::model::objects_path(config_id))?;
     let targets: Vec<String> = unit_args
         .iter()
         .map(|a| norm_unit(&objects, a).map(|u| obj_target(config_id, &u)))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let tools = crate::manifest::load_tools_manifest()?;
-    let ninja_exe = crate::bootstrap::resolve_ninja(&tools, crate::bootstrap::ToolMiss::RequireBootstrapped)?;
-    let output = std::process::Command::new(&ninja_exe)
-        .arg("-t")
-        .arg("commands")
-        .args(&targets)
-        .output()
-        .map_err(|e| anyhow::anyhow!("running ninja -t commands: {e}"))?;
-    if !output.status.success() {
-        anyhow::bail!("ninja -t commands failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    ensure_compiler_host()?;
+    if !std::path::Path::new(NINJA_MANIFEST).exists() {
+        anyhow::bail!("{NINJA_MANIFEST} not found; run `fl bootstrap` first");
     }
+
+    // Verbosity::Normal gives an in-place progress line on a terminal and one
+    // line per compile everywhere else, which is what a CI log wants.
+    let build = shuriken::BuildConfig {
+        parallelism: jobs.unwrap_or_else(shuriken::util::guess_parallelism).max(1),
+        ..Default::default()
+    };
+    let (parallelism, verbosity) = (build.parallelism, build.verbosity);
 
     let repo_root = std::env::current_dir()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut failed = false;
+    let options = shuriken::EngineOptions {
+        build,
+        // `fl bootstrap` owns build.ninja; never let a build regenerate it.
+        rebuild_manifest: false,
+        command_runner: Some(std::sync::Arc::new(move |cfg: &shuriken::BuildConfig| {
+            let mut runner = shuriken::RealCommandRunner::new(cfg.parallelism);
+            let root = repo_root.clone();
+            runner.set_launcher(std::sync::Arc::new(move |command: &str| launch_compile(&root, command)));
+            Box::new(runner)
+        })),
+        ..Default::default()
+    };
 
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts: Vec<String> = shlex_split_non_posix(line).into_iter().map(|p| strip_arg_quotes(&p)).collect();
-        if parts.is_empty() {
-            continue;
-        }
-        // ninja creates each edge's output directory before running it; since
-        // we run the command ourselves, we must too, or CL.EXE's /Fo fails
-        // with C1083 when build/<id>/obj/.../ doesn't already exist.
-        if let Some(out) = compile_output_path(&parts)
-            && let Some(parent) = out.parent()
-        {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("creating output dir {}: {e}", parent.display()))?;
-        }
-        let mut command = if parts[0].to_lowercase().ends_with("cl.exe") {
-            parts[0] = resolve_existing_path(&repo_root.join(&parts[0])).to_string_lossy().to_string();
-            compiler_command(&parts[0])?
-        } else {
-            std::process::Command::new(&parts[0])
-        };
-        let status = command
-            .args(&parts[1..])
-            .status()
-            .map_err(|e| anyhow::anyhow!("running compile command: {e}"))?;
-        if !status.success() {
-            eprintln!("FAILED: {line}");
-            failed = true;
-        }
+    let mut engine = shuriken::Engine::load(NINJA_MANIFEST, options).map_err(|e| anyhow::anyhow!("{e}"))?;
+    for warning in engine.take_warnings() {
+        crate::log::warn(&warning);
     }
 
-    if failed {
-        anyhow::bail!("one or more compile commands failed");
+    let mut status = shuriken::ConsoleStatus::new(verbosity, parallelism);
+    let summary = engine
+        .build_with_status(&targets, &mut status)
+        .map_err(|e| anyhow::anyhow!("build stopped: {e}"))?;
+    if summary.up_to_date {
+        crate::log::info("everything up to date");
     }
     Ok(())
 }
@@ -781,31 +788,50 @@ mod tests {
         assert_eq!(strip_arg_quotes("/O2"), "/O2");
     }
 
-    #[test]
-    fn extracts_msvc_fo_output_path() {
-        let parts: Vec<String> = ["cl.exe", "/c", "src/x.cpp", "/Fobuild/052103/obj/x.dll/src/x.dll.obj"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            compile_output_path(&parts),
-            Some(std::path::PathBuf::from("build/052103/obj/x.dll/src/x.dll.obj"))
-        );
+    /// The launcher is the only Freelancer-specific part of running a build, so
+    /// these pin down what it hands to the operating system. Output
+    /// directories, scheduling and up-to-date checks belong to the engine.
+    fn launched(command: &str) -> (String, Vec<String>) {
+        let cmd = launch_compile(std::path::Path::new("/repo"), command);
+        (
+            cmd.get_program().to_string_lossy().to_string(),
+            cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect(),
+        )
     }
 
     #[test]
-    fn extracts_portable_dash_o_output_path() {
-        let parts: Vec<String> = ["gcc", "-c", "x.c", "-o", "build/obj/x.o"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(compile_output_path(&parts), Some(std::path::PathBuf::from("build/obj/x.o")));
+    fn launches_msvc_through_wine_off_windows() {
+        let (program, args) = launched("build/msvc6.0/BIN/CL.EXE /O2 /c src/x.cpp \"/Fobuild/x.obj\"");
+        if cfg!(windows) {
+            assert!(program.to_lowercase().ends_with("cl.exe"), "{program}");
+            assert_eq!(args, vec!["/O2", "/c", "src/x.cpp", "/Fobuild/x.obj"]);
+        } else {
+            assert_eq!(program, "wine");
+            // The compiler path is absolute so Wine can find it, and the quotes
+            // the manifest needs around /Fo are stripped before exec.
+            assert!(args[0].ends_with("CL.EXE"), "{args:?}");
+            assert_eq!(&args[1..], ["/O2", "/c", "src/x.cpp", "/Fobuild/x.obj"]);
+        }
     }
 
     #[test]
-    fn returns_none_when_no_output_flag() {
-        let parts: Vec<String> = ["cl.exe", "src/x.cpp"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(compile_output_path(&parts), None);
+    fn launches_a_non_msvc_command_directly() {
+        let (program, args) = launched("gcc -c x.c -o build/obj/x.o");
+        assert_eq!(program, "gcc");
+        assert_eq!(args, vec!["-c", "x.c", "-o", "build/obj/x.o"]);
+    }
+
+    #[test]
+    fn keeps_quoted_arguments_with_spaces_together() {
+        let (_, args) = launched("cl.exe \"/I./my src\" /c x.cpp");
+        assert_eq!(args.iter().filter(|a| a.contains("my src")).count(), 1, "{args:?}");
+    }
+
+    #[test]
+    fn an_empty_command_line_does_not_panic() {
+        let (program, args) = launched("   ");
+        assert_eq!(program, "");
+        assert!(args.is_empty());
     }
 
     #[test]
