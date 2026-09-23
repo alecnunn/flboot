@@ -69,8 +69,13 @@ enum Commands {
         #[arg(long)]
         only: Vec<String>,
     },
-    /// Compile object(s) with the exact flags ninja would use
-    Build { units: Vec<String> },
+    /// Compile object(s), rebuilding only what changed
+    Build {
+        units: Vec<String>,
+        /// Compiles to run at once [default: one per core, plus two]
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
+    },
     /// Regenerate one unit's target object from its delink/split config
     Delink { unit: String },
     /// Rename target symbol(s) and re-delink
@@ -98,7 +103,7 @@ fn main() -> anyhow::Result<()> {
             skip_delink,
             &only,
         ),
-        Commands::Build { units } => dev::cmd_build(&cli.config_id, &units),
+        Commands::Build { units, jobs } => dev::cmd_build(&cli.config_id, &units, jobs),
         Commands::Delink { unit } => dev::cmd_delink(&cli.config_id, &unit),
         Commands::Claim { unit, renames } => dev::cmd_claim(&cli.config_id, &unit, &renames),
         Commands::Claims { units } => claims::cmd_claims(&cli.config_id, &units),

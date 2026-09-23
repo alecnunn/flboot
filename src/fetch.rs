@@ -87,16 +87,6 @@ pub fn download_file(url: &str, dest: &Path, expected_sha1: Option<&str>) -> any
     Ok(())
 }
 
-pub fn extract_zip_entry(zip_path: &Path, entry_name: &str, dest_dir: &Path) -> anyhow::Result<()> {
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-    let mut entry = archive.by_name(entry_name)?;
-    std::fs::create_dir_all(dest_dir)?;
-    let mut out = std::fs::File::create(dest_dir.join(entry_name))?;
-    std::io::copy(&mut entry, &mut out)?;
-    Ok(())
-}
-
 pub fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> anyhow::Result<()> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
@@ -140,7 +130,6 @@ pub fn set_executable(_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("flboot-fetch-test-{name}-{}", std::process::id()));
@@ -185,24 +174,6 @@ mod tests {
         let result = verify_hash(false, &path, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         std::fs::remove_dir_all(&dir).ok();
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn extract_zip_entry_roundtrips() {
-        let dir = temp_dir("zip");
-        let zip_path = dir.join("test.zip");
-        {
-            let file = std::fs::File::create(&zip_path).unwrap();
-            let mut zip = zip::ZipWriter::new(file);
-            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default();
-            zip.start_file("ninja.exe", options).unwrap();
-            zip.write_all(b"fake ninja binary").unwrap();
-            zip.finish().unwrap();
-        }
-        extract_zip_entry(&zip_path, "ninja.exe", &dir).unwrap();
-        let extracted = std::fs::read_to_string(dir.join("ninja.exe")).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(extracted, "fake ninja binary");
     }
 
     #[test]

@@ -116,7 +116,7 @@ mod resolve_tool_tests {
     }
 }
 
-use crate::manifest::{BinaryEntry, BinaryTool, SevenZip, ToolsManifest, ZipEntry, ZipTool};
+use crate::manifest::{BinaryEntry, BinaryTool, SevenZip, ToolsManifest};
 
 /// Downloads a single-binary tool (delink) and marks it
 /// executable (no-op on Windows). Platform difference lives entirely in the
@@ -151,28 +151,8 @@ pub fn resolve_delink(
     resolve_binary(&manifest.delink, override_path, "delink", on_miss)
 }
 
-/// Downloads a zip-packaged tool (ninja), extracts one entry, and marks it
-/// executable (no-op on Windows). Not cfg-split -- platform data is in the manifest.
-fn download_zip_tool(entry: &ZipEntry, dest: &Path) -> anyhow::Result<()> {
-    fetch::download_file(&entry.url, Path::new(&entry.archive), entry.sha1.as_deref())?;
-    let dest_dir = dest.parent().expect("tool download path always has a parent");
-    crate::log::info(&format!("extracting {} -> {}", entry.archive, dest_dir.display()));
-    fetch::extract_zip_entry(Path::new(&entry.archive), &entry.entry, dest_dir)?;
-    fetch::set_executable(dest)
-}
-
-pub fn resolve_ninja(manifest: &ToolsManifest, on_miss: ToolMiss) -> anyhow::Result<PathBuf> {
-    let tool: &ZipTool = &manifest.ninja;
-    let entry = tool.current();
-    let candidates: Vec<&str> = tool.path_names.iter().map(String::as_str).collect();
-    resolve_tool(&candidates, which_lookup, Path::new(&entry.dest), on_miss, |dest| {
-        download_zip_tool(entry, dest)
-    })
-}
-
 pub fn ensure_tools(manifest: &ToolsManifest, delink_override: Option<&str>) -> anyhow::Result<()> {
     resolve_delink(manifest, delink_override, ToolMiss::Download)?;
-    resolve_ninja(manifest, ToolMiss::Download)?;
 
     let msvc6 = &manifest.msvc6;
     let msvc6_dir = Path::new(&msvc6.dest_dir);

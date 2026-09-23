@@ -246,6 +246,9 @@ pub fn write_ninja(config_id: &str, config: &Config, objects: &Objects) -> anyho
     let cc = config.compiler_c.as_deref().unwrap_or(cxx);
     let is_msvc = cxx.to_lowercase().ends_with("cl.exe");
 
+    // Keeps .ninja_log/.ninja_deps under the already-ignored build tree rather
+    // than dropping them in the repo root.
+    out.push_str(&format!("builddir = build/{config_id}\n\n"));
     out.push_str(&format!("cc = {cc}\n\n"));
     out.push_str(&format!("cxx = {cxx}\n\n"));
 
@@ -554,6 +557,7 @@ mod generation_tests {
         let config = fixture_config();
         let objects = fixture_objects();
         let ninja = write_ninja("cfgid", &config, &objects).unwrap();
+        assert!(ninja.contains("builddir = build/cfgid"));
         assert!(ninja.contains("cc = build/msvc6.0/BIN/CL.EXE"));
         assert!(ninja.contains("rule compile_cxx"));
         assert!(ninja.contains("build build/cfgid/obj/A.dll/src/A.dll.obj: compile_cxx ./src/A.dll.cpp"));
